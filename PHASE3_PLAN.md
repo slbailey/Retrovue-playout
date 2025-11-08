@@ -14,23 +14,25 @@ Transition from synthetic frame generation to actual decoding using libavformat/
 
 ## Key Deliverables
 
-1. **Decode Layer**
-   - Implement `FFmpegDecoder` in `src/decode/`
-   - Support H.264 MP4 input via `avformat_open_input`
-   - Push frames into `FrameRingBuffer`
-   - Error handling + metrics export
+1. **Decode Layer** ✅ **COMPLETE**
+   - ✅ Implement `FFmpegDecoder` in `src/decode/`
+   - ✅ Support H.264 MP4 input via `avformat_open_input`
+   - ✅ Push frames into `FrameRingBuffer`
+   - ✅ Error handling + metrics export
+   - ✅ Conditional compilation for FFmpeg availability
+   - ✅ Performance statistics tracking
 
-2. **Renderer Layer**
+2. **Renderer Layer** 🚧 **IN PROGRESS**
    - Implement `FrameRenderer` interface
    - Support headless render (for testing) and preview window (debug)
    - Frame timing driven by metadata.pts
 
-3. **Telemetry**
+3. **Telemetry** 🚧 **IN PROGRESS**
    - Add `MetricsHTTPServer` (src/telemetry/)
    - Expose Prometheus-compatible metrics on `localhost:9090/metrics`
    - Include per-channel buffer_depth, fps, frame_delay_ms
 
-4. **Integration**
+4. **Integration** 📋 **PENDING**
    - Extend `PlayoutService` to manage renderer lifecycle
    - Synchronize decode/render threads
    - Ensure clean stop/restart behavior
