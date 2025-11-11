@@ -1,127 +1,75 @@
-# Phase 2 – Decode & Frame Bus Integration
+_Metadata: Status=Complete; Scope=Milestone planning; Owner=@runtime-platform_
 
-> **Related:**  
-> [Architecture Overview](../architecture/ArchitectureOverview.md)  
-> [Playout Engine Contract](../contracts/PlayoutEngineContract.md)  
-> [Phase 1 Skeleton](../milestones/Phase1_Skeleton.md)
+_Related: [Architecture Overview](../architecture/ArchitectureOverview.md); [Playout Engine Contract](../contracts/PlayoutEngineContract.md); [Phase 1 Skeleton](../milestones/Phase1_Skeleton.md)_
 
----
+# Phase 2 - Decode and frame bus integration
 
-## ✨ Purpose
+## Purpose
 
-Phase 2 transforms the RetroVue Playout Engine from a stub RPC service into a real-time, production-ready media playout processor.  
-This unlocks **real decoding**, **advanced buffering**, and **live telemetry**, allowing the Renderer to pull active streams directly from the native engine with clock-tight accuracy.
+Capture the goals and deliverables for Phase 2, which elevates the playout engine from a stub RPC service to a production-ready decoder with real buffering and telemetry.
 
----
+## Objectives
 
-## 🎯 Objectives
+| Subsystem              | Goal                                           | Outcome                                               |
+| ---------------------- | ---------------------------------------------- | ----------------------------------------------------- |
+| Decode pipeline        | Leverage `libavformat`/`libavcodec`            | Real frame decoding from file or URI sources          |
+| Frame bus / ring buffer| Provide shared-memory frame queue              | Thread-safe producer/consumer bridge to Renderer      |
+| Telemetry / metrics    | Expose Prometheus `/metrics` endpoint          | Channel state and timing visibility                   |
+| Integration testing    | Validate Python ↔ C++ plumbing                 | End-to-end confidence entering Phase 3                |
 
-| Subsystem                   | Goal                                             | Outcome                                             |
-| --------------------------- | ------------------------------------------------ | --------------------------------------------------- |
-| 🟦 **Decode Pipeline**      | Leverage `libavformat`/`libavcodec` for decoding | Real frame decoding from file/URI sources           |
-| 🟧 **Frame Bus / Ring Buf** | Shared-memory frame queue                        | Thread-safe producer/consumer bridge to Renderer    |
-| 🟨 **Telemetry / Metrics**  | Prometheus `/metrics` endpoint                   | Channel health, state, and debug visibility         |
-| 🟩 **Integration Testing**  | Validate full Python ↔ C++ plumbing              | Ready for end-to-end and contract-driven tests (P3) |
+## Subsystem details
 
----
+### Decode pipeline
 
-## 🔬 Subsystem Details
+- Key files: `src/decode/FrameProducer.h`, `src/decode/FrameProducer.cpp`.
+- Responsibilities:
+  - Open media inputs via `avformat_open_input`.
+  - Select optimal stream, initialize codecs, and decode frames.
+  - Populate `FrameMetadata` (PTS, DTS, duration, asset URI) for each frame.
+- Thread model:
+  - One decode thread per channel.
+  - Maintain a 2-3 frame lead ahead of Renderer consumption.
+  - Avoid blocking gRPC or telemetry threads.
 
-### 1️⃣ Decode Pipeline
+### Frame bus and ring buffer
 
-**Key Files:**
+- Key files: `src/buffer/FrameRingBuffer.h`, `src/buffer/FrameRingBuffer.cpp`.
+- Design:
+  - Fixed-size circular buffer (baseline: 60 frames).
+  - Atomic read/write indices and non-blocking `push`/`pop`.
+  - Future option for condition variables to smooth underflow recovery.
+- Telemetry:
+  - `retrovue_playout_buffer_depth_frames` exposes current buffer depth.
+  - Overflow/underflow raise Prometheus counters and warning logs.
 
-- `src/decode/FrameProducer.h`
-- `src/decode/FrameProducer.cpp`
+### Telemetry
 
-**Responsibilities:**
+- Key file: `src/telemetry/MetricsExporter.cpp`.
+- Responsibilities:
+  - Serve metrics at `/metrics`.
+  - Export gauges and counters:
 
-- Open media input using `avformat_open_input`.
-- Select the optimal video stream and initialize decoders.
-- Continuously decode frames, extracting **PTS**, **DTS**, and duration.
-- Populate a `FrameMetadata` struct for every output frame:
+    | Metric                                  | Type    | Description                                      |
+    | --------------------------------------- | ------- | ------------------------------------------------ |
+    | `retrovue_playout_channel_state`        | Gauge   | Channel state (`ready`, `buffering`, `error`)    |
+    | `retrovue_playout_buffer_depth_frames`  | Gauge   | Frames in buffer                                 |
+    | `retrovue_playout_frame_gap_seconds`    | Gauge   | MasterClock delta                                |
+    | `retrovue_playout_decode_failure_count` | Counter | Accumulated decode failures                      |
 
-  ```cpp
-  struct FrameMetadata {
-      int64_t pts;
-      int64_t dts;
-      double duration;
-      std::string asset_uri;
-  };
-  ```
+### Integration testing
 
-- **Thread Model:**
-  - Dedicated decode thread per channel
-  - Maintain a 2–3 frame lead time ahead of Renderer consumption
-  - Must not block the main gRPC or metrics threads
+- Assets:
+- `tests/test_decode.cpp` - decode pipeline coverage.
+- `tests/test_buffer.cpp` - ring buffer stress scenarios.
+- `scripts/test_playout_loop.py` - Python client rehearsal.
+- Success indicators:
+  - `StartChannel` spins up threads and buffers frames deterministically.
+  - Frames flow continuously from decoder to Renderer.
+  - Metrics remain accurate under steady load.
+  - Contract suites pass without flakiness.
 
----
+## Follow-ups
 
-### 2️⃣ Frame Bus / Ring Buffer
-
-**Files:**
-
-- `src/buffer/FrameRingBuffer.h`
-- `src/buffer/FrameRingBuffer.cpp`
-
-**Core Design:**
-
-- Circular buffer of fixed size (e.g., 60 frames)
-- Atomic read/write indices (`std::atomic<uint32_t>`)
-- Non-blocking `push()`/`pop()` methods (returns success/failure)
-- Optional: add a condition variable for underflow/overflow recovery in future phases
-
-**Metrics & Telemetry:**
-
-- Expose current buffer depth (`retrovue_playout_buffer_depth_frames`)
-- Clearly report starvation (underflow) or overflow scenarios, e.g. via warning logs and Prometheus counters
-
----
-
-### 3️⃣ Telemetry / Prometheus Metrics
-
-**Files:**
-
-- `src/telemetry/MetricsExporter.cpp`
-
-**Responsibilities:**
-
-- Serve Prometheus metrics endpoint at `/metrics`
-- Export the following metrics:
-
-  | Metric                                  | Type    | Description                                     |
-  | --------------------------------------- | ------- | ----------------------------------------------- |
-  | `retrovue_playout_channel_state`        | Gauge   | `ready`, `buffering`, `error`, or `stopped`     |
-  | `retrovue_playout_buffer_depth_frames`  | Gauge   | Number of frames currently in buffer            |
-  | `retrovue_playout_frame_gap_seconds`    | Gauge   | Deviation from MasterClock PTS alignment        |
-  | `retrovue_playout_decode_failure_count` | Counter | Total decode errors (future: per channel/asset) |
-
----
-
-### 4️⃣ Integration Testing
-
-**New Tests:**
-
-- `tests/test_decode.cpp`: verifies decode threads read frames and fill buffers as expected
-- `tests/test_buffer.cpp`: stress-tests ring buffer push/pop, starvation, and overflow logic
-- `scripts/test_playout_loop.py`: confirms the Python Renderer can consume live frames from the engine and that telemetry matches expectations
-
-**Success Criteria:**
-
-- ✅ `StartChannel` triggers correct decode thread lifecycle
-- ✅ Frames flow continuously: **decoder → buffer → Renderer**
-- ✅ All required metrics visible and accurately updating at `/metrics`
-- ✅ No buffer underflow or overflow in steady-state playback
-- ✅ All tests in `test_decode.cpp` and `test_buffer.cpp` pass reliably
-- ✅ Integration script shows stable Python ↔ C++ playout handoff
-
----
-
-**Bonus & Stretch Goals (recommended):**
-
-- Add visibility logs for frame timing and buffer state to assist with e2e debugging.
-- Make buffer size and decode thread count runtime-configurable.
-- Ensure Prometheus `help`/`type` comments are correctly generated for all metrics.
-- Consider stubbing out slate frame injection for error recovery (as prep for Phase 3).
-
----
+- Add structured logs for frame timing and buffer state.
+- Expose buffer sizing and thread counts as runtime configuration.
+- Extend metrics with `help`/`type` metadata and slate injection coverage.

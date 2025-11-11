@@ -16,14 +16,14 @@ This document translates the 8 core invariants from `MetricsAndTimingDomain.md` 
 
 The following 8 invariants from the [Metrics & Timing Domain](../domain/MetricsAndTimingDomain.md) are validated by this contract:
 
-1. **MasterClock Authority**: MasterClock is the single authoritative time source for all scheduled playout activity
-2. **Component Time Alignment**: All components align timing to MasterClock timestamps, not system wall clock
-3. **Frame Cadence**: Nominal 29.97 fps with ±2 ms drift tolerance per frame
-4. **End-to-End Latency**: < 33 ms average, < 50 ms sustained maximum
-5. **Prometheus Metrics**: Six required metrics must be exported (`frame_decode_time_ms`, `frame_render_time_ms`, `frames_dropped_total`, `frames_skipped_total`, `clock_offset_ms`, `uptime_seconds`)
-6. **Metrics Sampling**: 1-second sampling frequency for cumulative and instantaneous statistics
-7. **Timing Anomalies**: All anomalies must be logged and surfaced via `/metrics` endpoint
-8. **Forward Compatibility**: Phase 4 MasterClock integration must not require breaking changes
+1. **MT-001 – MasterClock Authority**: MasterClock is the single authoritative time source for all scheduled playout activity
+2. **MT-002 – Component Time Alignment**: All components align timing to MasterClock timestamps, not system wall clock
+3. **MT-003 – Frame Cadence**: Nominal 29.97 fps with ±2 ms drift tolerance per frame
+4. **MT-004 – End-to-End Latency**: < 33 ms average, < 50 ms sustained maximum
+5. **MT-005 – Prometheus Metrics**: Six required metrics must be exported (`frame_decode_time_ms`, `frame_render_time_ms`, `frames_dropped_total`, `frames_skipped_total`, `clock_offset_ms`, `uptime_seconds`)
+6. **MT-006 – Metrics Sampling**: 1-second sampling frequency for cumulative and instantaneous statistics
+7. **MT-007 – Timing Anomalies**: All anomalies must be logged and surfaced via `/metrics` endpoint
+8. **MT-008 – Forward Compatibility**: Phase 4 MasterClock integration must not require breaking changes
 
 Each invariant is validated by one or more contract tests below.
 
@@ -50,7 +50,7 @@ All tests must be:
 
 ---
 
-## Invariant #1: MasterClock Authority
+## MT-001: MasterClock Authority
 
 **Statement**: The MasterClock service is the single authoritative time source for all scheduled playout activity.
 
@@ -98,7 +98,7 @@ All tests must be:
 
 ---
 
-## Invariant #2: Component Time Alignment
+## MT-002: Component Time Alignment
 
 **Statement**: FFmpegDecoder, FrameRingBuffer, and FrameRenderer must align their timing to MasterClock timestamps, not system wall clock.
 
@@ -148,7 +148,7 @@ All tests must be:
 
 ---
 
-## Invariant #3: Frame Cadence (29.97 fps, ±2 ms tolerance)
+## MT-003: Frame Cadence (29.97 fps, ±2 ms tolerance)
 
 **Statement**: The nominal frame cadence is 29.97 fps unless overridden by source time base; tolerance for drift is ±2 ms per frame.
 
@@ -229,7 +229,7 @@ All tests must be:
 
 ---
 
-## Invariant #4: End-to-End Latency (< 33 ms avg, < 50 ms sustained)
+## MT-004: End-to-End Latency (< 33 ms avg, < 50 ms sustained)
 
 **Statement**: Latency between decode and render must remain < 33 ms on average and never exceed 50 ms sustained.
 
@@ -289,7 +289,7 @@ All tests must be:
 
 ---
 
-## Invariant #5: Prometheus Metrics (Required Metrics)
+## MT-005: Prometheus Metrics (Required Metrics)
 
 **Statement**: MetricsHTTPServer must export the 6 required metrics in Prometheus format.
 
@@ -351,7 +351,7 @@ All tests must be:
 
 ---
 
-## Invariant #6: Metrics Sampling (Every 1 Second)
+## MT-006: Metrics Sampling (Every 1 Second)
 
 **Statement**: Metrics sampling must occur every 1 second and reflect cumulative and instantaneous statistics.
 
@@ -390,7 +390,7 @@ All tests must be:
 
 ---
 
-## Invariant #7: Timing Anomalies (Logged and Surfaced)
+## MT-007: Timing Anomalies (Logged and Surfaced)
 
 **Statement**: Timing anomalies must be logged and surfaced via `/metrics` endpoint.
 
@@ -462,7 +462,7 @@ All tests must be:
 
 ---
 
-## Invariant #8: Forward Compatibility (Phase 4 MasterClock Integration)
+## MT-008: Forward Compatibility (Phase 4 MasterClock Integration)
 
 **Statement**: This contract anticipates Phase 4 MasterClock formalization and must remain forward-compatible.
 

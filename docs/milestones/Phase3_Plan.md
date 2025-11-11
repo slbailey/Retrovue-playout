@@ -1,53 +1,52 @@
-# 🚀 Phase 3 – Real Decode + Renderer Integration
+_Metadata: Status=Planned; Scope=Milestone; Owner=@runtime-platform_
 
-## Objective
+# Phase 3 - Real decode and renderer integration plan
 
-Transition from synthetic frame generation to actual decoding using libavformat/libavcodec, and connect decoded frames to the renderer subsystem.
+## Purpose
 
-## Goals
+Define the deliverables required to replace synthetic frames with FFmpeg-backed decoding and to stream frames through the Renderer with complete telemetry.
 
-- Replace stubbed FrameProducer with real FFmpeg-based decoder
-- Add `Renderer` module for frame visualization (OpenGL or CPU blit)
-- Expose metrics via HTTP endpoint using Prometheus text format
-- Integrate frame timing + PTS synchronization with playout clock
-- Maintain thread-safe, lock-free design with minimal latency
+## Objectives
 
-## Key Deliverables
+- Implement `FFmpegDecoder` and integrate it with `FrameProducer`.
+- Deliver `FrameRenderer` interfaces for headless and preview consumption.
+- Add `MetricsHTTPServer` exposing Prometheus metrics for decode and render performance.
+- Synchronize decode, buffer, and render threads with deterministic timing.
 
-1. **Decode Layer** ✅ **COMPLETE**
+## Deliverables
 
-   - ✅ Implement `FFmpegDecoder` in `src/decode/`
-   - ✅ Support H.264 MP4 input via `avformat_open_input`
-   - ✅ Push frames into `FrameRingBuffer`
-   - ✅ Error handling + metrics export
-   - ✅ Conditional compilation for FFmpeg availability
-   - ✅ Performance statistics tracking
+1. **Decode layer**
+   - Implement `FFmpegDecoder` under `src/decode/` with support for H.264/HEVC inputs.
+   - Push decoded frames into `FrameRingBuffer` with metadata intact.
+   - Provide feature flag to fall back to stub decode when FFmpeg is unavailable.
 
-2. **Renderer Layer** 🚧 **IN PROGRESS**
+2. **Renderer layer**
+   - Define `FrameRenderer` interface and provide headless + preview implementations.
+   - Drive render cadence from frame metadata (PTS/DTS) and monitor latency.
 
-   - Implement `FrameRenderer` interface
-   - Support headless render (for testing) and preview window (debug)
-   - Frame timing driven by metadata.pts
+3. **Telemetry**
+   - Introduce `MetricsHTTPServer` with `/metrics` endpoint (default port configurable).
+  - Publish metrics: render FPS, frame delay, buffer health, decode failures.
 
-3. **Telemetry** 🚧 **IN PROGRESS**
+4. **Integration**
+   - Extend `PlayoutControlImpl` to orchestrate renderer lifecycle alongside producers.
+   - Ensure clean start/stop semantics and resilience to decode failures.
 
-   - Add `MetricsHTTPServer` (src/telemetry/)
-   - Expose Prometheus-compatible metrics on `localhost:9090/metrics`
-   - Include per-channel buffer_depth, fps, frame_delay_ms
+## Validation strategy
 
-4. **Integration** 📋 **PENDING**
-   - Extend `PlayoutService` to manage renderer lifecycle
-   - Synchronize decode/render threads
-   - Ensure clean stop/restart behavior
+- Unit tests covering FFmpeg initialization, frame decode, and renderer fetch behavior.
+- Integration rehearsal `scripts/test_playout_loop.py` verifying end-to-end flow.
+- Benchmark decoding latency and buffer depth stability under sustained playback.
 
-## Validation
+## Risks and mitigations
 
-- Unit tests for FFmpeg decode initialization and buffer output
-- Integration tests verifying playback correctness
-- Benchmark tests for latency and throughput
+- **Codec availability** - rely on vcpkg FFmpeg builds and document prerequisites.
+- **Timing drift** - add telemetry for frame gaps and enforce MasterClock alignment.
+- **Resource contention** - profile thread usage and adjust concurrency per codec.
 
-## Notes
+## See also
 
-- Phase 2 stub code will remain behind a `#define RETROVUE_STUB_DECODE` flag
-- This phase introduces the first full media pipeline (decode → render → metrics)
-- Target completion: End of current sprint
+- [Phase 2 - Decode and frame bus complete](Phase2_Complete.md)
+- [Renderer Domain](../domain/RendererDomain.md)
+- [Playout Runtime](../runtime/PlayoutRuntime.md)
+

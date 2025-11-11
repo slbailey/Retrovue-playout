@@ -1,4 +1,4 @@
-_Related: [Architecture overview](../architecture/ArchitectureOverview.md) • [RetroVue runtime – ChannelManager](../../Retrovue/docs/runtime/ChannelManager.md)_
+_Related: [Architecture overview](../architecture/ArchitectureOverview.md) • [RetroVue runtime - ChannelManager](../../Retrovue/docs/runtime/ChannelManager.md)_
 
 # Playout runtime
 
@@ -22,13 +22,13 @@ Explain the execution model, threading, timing rules, and operational safeguards
 ## Timing guarantees
 
 - All timing decisions reference the RetroVue MasterClock delivered over the control API.
-- Minimum frame lead time: 150 ms. Soft maximum: 500 ms. Exceeding the ceiling triggers buffer trimming.
+- Minimum frame lead time: 150 ms. Soft maximum: 500 ms. Exceeding the ceiling triggers buffer trimming.
 - Slate insertion occurs when available frames drop below 30, preventing Renderer starvation.
 - Renderer consumption is intentionally decoupled from decode timing, keeping output aligned with the MasterClock.
 
 ## Resource management
 
-- Every channel owns a memory budget for frame staging (default 90 frames ≈ 3 s @ 30 fps).
+- Every channel owns a memory budget for frame staging (default 90 frames is approximately 3 s at 30 fps).
 - Libav contexts are pooled per codec to reduce reinitialization costs between plan updates.
 - Backpressure from the Renderer ring buffer dynamically slows decode throughput to stay within the soft maximum.
 

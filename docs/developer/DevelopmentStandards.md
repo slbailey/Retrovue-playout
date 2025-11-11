@@ -1,6 +1,18 @@
-## 🧱 C++ Project Structure Standard
+_Metadata: Status=Stable; Scope=Developer standards; Owner=@runtime-platform_
 
-All RetroVue native modules (e.g. `retrovue-playout`, `retrovue-ingest`) must follow this layout:
+# Development standards
+
+## Purpose
+
+Document the local expectations for C++ module layout, matching the canonical guidance in `_standards/repository-conventions.md`.
+
+## Scope
+
+- Applies to native RetroVue modules such as `retrovue-air`.
+- Covers header/source placement, namespace structure, and CMake exposure.
+- Supplements shared standards; defer to `_standards/` when conflicts arise.
+
+## Project layout
 
 ```
 project-root/
@@ -16,20 +28,17 @@ project-root/
 ├─ CMakeLists.txt
 ```
 
-### Rules
+## Rules
 
-1. **Public headers go in `include/retrovue/<module>/`**  
-   These define the module's external API and are imported by other RetroVue modules or bindings.  
-   Example:
+1. **Public headers** live under `include/retrovue/<module>/` and mirror namespaces.
 
    ```cpp
    #include "retrovue/buffer/FrameRingBuffer.h"
+   namespace retrovue::buffer { class FrameRingBuffer { ... }; }
    ```
 
-2. **Private headers stay beside their .cpp files in `src/`**  
-   Used for internal helpers or classes not exposed externally.
-
-3. **CMake must export the include path:**
+2. **Private headers** stay beside their `.cpp` implementations within `src/<module>/`.
+3. **CMake exposure** - export the include directory to dependents:
 
    ```cmake
    target_include_directories(${PROJECT_NAME}
@@ -37,18 +46,12 @@ project-root/
    )
    ```
 
-4. **Namespaces mirror directory hierarchy**
+4. **One-to-one pairing** - every public header has a matching source file (`FrameRingBuffer.h` <-> `FrameRingBuffer.cpp`) unless the implementation is header-only.
+5. **No flat headers** - avoid placing headers directly under `include/`. Every file belongs to a module directory.
+6. **Generated code** (protobuf stubs) stays under `build/generated/retrovue/` and is never edited directly.
+7. **Telemetry helpers** live under `src/telemetry/` and expose Prometheus-friendly metrics ids (`retrovue_playout_*`).
 
-   ```cpp
-   namespace retrovue::buffer {
-       class FrameRingBuffer { ... };
-   }
-   ```
+## See also
 
-5. **No flat headers under `include/` — all public files must live under `retrovue/<module>/`.**
-
-6. **Header/Source pairing**
-   - `.h` → `include/retrovue/<module>/`
-   - `.cpp` → `src/<module>/`
-
-This ensures consistent structure across all RetroVue components, simplifies include paths, and supports clean separation between public and private APIs.
+- `_standards/repository-conventions.md`
+- `_standards/documentation-standards.md`

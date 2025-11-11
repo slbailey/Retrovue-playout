@@ -1,131 +1,72 @@
-# RetroVue Playout Engine — Documentation Index
+_Metadata: Status=Canonical; Scope=Documentation index_
 
-The RetroVue Playout Engine is a native C++ subsystem responsible for frame-accurate video decoding and rendering. It interfaces with the Python ChannelManager via gRPC to provide continuous, clock-aligned frame streams for 24/7 broadcast operations.
+# RetroVue Playout Engine - Documentation Index
 
-This directory is organized by audience and purpose.
+## Purpose
 
----
+Guide contributors and operators to the correct documentation based on their goal or audience. This index mirrors the structure defined in `_standards/documentation-index-template.md`.
 
 ## Architecture
 
-High-level system design and component relationships.
+- [Architecture Overview](architecture/ArchitectureOverview.md) - System context and design drivers.
+- [Project Overview](PROJECT_OVERVIEW.md) - Program-level goals and phase summaries.
 
-- [Architecture Overview](architecture/ArchitectureOverview.md) - Complete system architecture
-- [Project Overview](PROJECT_OVERVIEW.md) - High-level project goals and phases
+## Domain models
 
----
-
-## Domain Models
-
-Core concepts and entities that define what the playout engine is and what it does. These documents describe the "what" and "why," not the "how."
-
-- [Playout Engine Domain](domain/PlayoutEngineDomain.md) - Core playout engine domain model
-- [Renderer Domain](domain/RendererDomain.md) - Frame renderer subsystem
-- [Metrics and Timing Domain](domain/MetricsAndTimingDomain.md) - Timing synchronization and telemetry
-
----
+- [Playout Engine Domain](domain/PlayoutEngineDomain.md) - Core entities and invariants.
+- [Renderer Domain](domain/RendererDomain.md) - Renderer responsibilities and relationships.
+- [Metrics and Timing Domain](domain/MetricsAndTimingDomain.md) - Timing and telemetry model.
 
 ## Contracts
 
-How we deliver and test the system. These define behavioral guarantees, API specifications, and testing requirements.
-
-- [Playout Engine Contract](contracts/PlayoutEngineContract.md) - gRPC API specification and guarantees
-- [Renderer Contract](contracts/RendererContract.md) - Renderer subsystem testing contract
-
----
+- [Playout Engine Contract](contracts/PlayoutEngineContract.md) - Control plane guarantees and rule IDs.
+- [Renderer Contract](contracts/RendererContract.md) - Renderer expectations and coverage.
+- [Metrics and Timing Contract](contracts/MetricsAndTimingContract.md) - Metrics schema and enforcement.
 
 ## Runtime
 
-How the playout engine behaves during operation.
+- [Playout Runtime](runtime/PlayoutRuntime.md) - Execution model, threading, and failure handling.
 
-- [Playout Runtime](runtime/PlayoutRuntime.md) - Runtime behavior and lifecycle
+## Developer guides
 
----
-
-## Developer
-
-Guides for developers working on or extending the playout engine.
-
-- [Quick Start](developer/QuickStart.md) - Getting started guide
-- [Build & Debug](developer/BuildAndDebug.md) - Build system and debugging workflow
-- [Development Standards](developer/DevelopmentStandards.md) - Code structure and standards
-
----
+- [Quick Start](developer/QuickStart.md) - Build and run instructions.
+- [Build and Debug](developer/BuildAndDebug.md) - Toolchain setup and troubleshooting.
+- [Development Standards](developer/DevelopmentStandards.md) - C++ layout and naming rules.
 
 ## Infrastructure
 
-Integration points and system boundaries.
-
-- [Integration](infra/Integration.md) - Integration with RetroVue core system
-
----
+- [Integration](infra/Integration.md) - Deployment topology and external dependencies.
 
 ## Testing
 
-Testing strategy and specifications.
-
-- [Playout Test Contract](testing/PlayoutTestContract.md) - Test requirements and validation
-
----
+- [Contract Testing](tests/ContractTesting.md) - Harness structure, fixtures, and registry expectations.
 
 ## Milestones
 
-Development roadmap and historical milestones.
+- [Roadmap](milestones/Roadmap.md) - Upcoming phases and scope.
+- [Phase 1 Complete](milestones/Phase1_Complete.md) - Bring-up summary.
+- [Phase 2 Plan](milestones/Phase2_Plan.md) - Decode and frame bus objectives.
+- [Phase 2 Complete](milestones/Phase2_Complete.md) - Deliverables and validation.
+- [Phase 3 Plan](milestones/Phase3_Plan.md) - Real decode and renderer plan.
+- [Phase 3 Complete](milestones/Phase3_Complete.md) - Outcomes and follow-ups.
+- [Phase 3 Complete - Refactoring](milestones/Refactoring_Complete.md) - Cleanup milestones.
 
-- [Roadmap](milestones/Roadmap.md) - Current and planned development phases
-- [Phase 1 Complete](milestones/Phase1_Complete.md) - gRPC skeleton implementation
-- [Phase 2 Plan](milestones/Phase2_Plan.md) - Phase 2 planning and objectives
-- [Phase 2 Complete](milestones/Phase2_Complete.md) - Frame buffer and stub decode
-- [Phase 3 Plan](milestones/Phase3_Plan.md) - Real decode and renderer plan
-- [Phase 3 Complete](milestones/Phase3_Complete.md) - FFmpeg decoder, renderer, and HTTP metrics
+## Documentation principles
 
----
+- Operators focus on runtime and infrastructure sections.
+- Developers rely on architecture, domain, contracts, and testing content before writing code.
+- Architects maintain domain and contract docs first, then guide implementation updates.
 
-## Related Projects
+## Quick links
 
-- [Retrovue Core](../../Retrovue/) - Python media asset manager and scheduling system
-- [Proto Definitions](../proto/retrovue/playout.proto) - gRPC service definitions
+- Understand the architecture → [Architecture Overview](architecture/ArchitectureOverview.md)
+- Build and run the engine → [Quick Start](developer/QuickStart.md)
+- Inspect the gRPC API → [Playout Engine Contract](contracts/PlayoutEngineContract.md)
+- Review current roadmap → [Roadmap](milestones/Roadmap.md)
+- Contribute code → [Development Standards](developer/DevelopmentStandards.md)
+- Look up terminology → [Glossary](GLOSSARY.md)
 
----
+## See also
 
-## Documentation Principles
-
-### Organization by Audience
-
-- **Operators** → Runtime behavior, configuration
-- **Developers** → Architecture, extension points, testing
-- **Architects** → Domain models, contracts, integration
-
-### Domain vs Contracts
-
-- **Domain** = What the system is (entities, relationships, behavior)
-- **Contracts** = How we test and deliver it (API specs, guarantees, validation)
-
-### Standards
-
-Follow the [Development Standards](development-standards.md) for code structure, naming conventions, and API design.
-
----
-
-## Quick Links
-
-### I want to...
-
-- **Understand the system architecture** → [Architecture Overview](architecture/ArchitectureOverview.md)
-- **Build and run the playout engine** → [Quick Start](developer/QuickStart.md)
-- **Understand the gRPC API** → [Playout Contract](contracts/PlayoutContract.md)
-- **See the development roadmap** → [Roadmap](milestones/Roadmap.md)
-- **Contribute code** → [Development Standards](developer/DevelopmentStandards.md)
-- **Debug a build issue** → [Build & Debug](developer/BuildAndDebug.md)
-
----
-
-## Status
-
-**Current Phase:** Phase 3 ✅ Complete  
-**Latest Milestone:** Renderer and HTTP metrics implementation  
-**Next Phase:** Phase 4 - Production hardening and multi-channel support
-
----
-
-**For questions or issues, see the main [README](../README.md) or consult the [Project Overview](PROJECT_OVERVIEW.md).**
+- [Main README](../README.md) - Repository overview.
+- [Project Overview](PROJECT_OVERVIEW.md) - Cross-phase narrative.
