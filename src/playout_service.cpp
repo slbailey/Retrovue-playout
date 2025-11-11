@@ -100,7 +100,8 @@ grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext* context,
   render_config.window_height = 1080;
   render_config.window_title = "RetroVue Channel " + std::to_string(channel_id);
 
-  worker->renderer = renderer::FrameRenderer::Create(render_config, *worker->ring_buffer);
+  worker->renderer = renderer::FrameRenderer::Create(
+      render_config, *worker->ring_buffer, master_clock_, metrics_exporter_, channel_id);
 
   // Start render thread
   if (!worker->renderer->Start()) {
@@ -117,6 +118,7 @@ grpc::Status PlayoutControlImpl::StartChannel(grpc::ServerContext* context,
     metrics.buffer_depth_frames = 0;
     metrics.frame_gap_seconds = 0.0;
     metrics.decode_failure_count = 0;
+    metrics.corrections_total = 0;
     metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
   }
 
@@ -190,6 +192,7 @@ grpc::Status PlayoutControlImpl::UpdatePlan(grpc::ServerContext* context,
     if (metrics_exporter_) {
       telemetry::ChannelMetrics metrics;
       metrics.state = telemetry::ChannelState::ERROR_STATE;
+    metrics.corrections_total = 0;
       metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
     }
     
@@ -251,6 +254,7 @@ grpc::Status PlayoutControlImpl::StopChannel(grpc::ServerContext* context,
     metrics.buffer_depth_frames = 0;
     metrics.frame_gap_seconds = 0.0;
     metrics.decode_failure_count = 0;
+    metrics.corrections_total = 0;
     metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
     
     // Remove from metrics after a brief delay (handled externally)

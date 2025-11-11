@@ -35,12 +35,14 @@ struct ChannelMetrics {
   uint64_t buffer_depth_frames;
   double frame_gap_seconds;
   uint64_t decode_failure_count;
+  uint64_t corrections_total;
   
   ChannelMetrics()
       : state(ChannelState::STOPPED),
         buffer_depth_frames(0),
         frame_gap_seconds(0.0),
-        decode_failure_count(0) {}
+        decode_failure_count(0),
+        corrections_total(0) {}
 };
 
 // MetricsExporter serves Prometheus metrics at an HTTP endpoint.

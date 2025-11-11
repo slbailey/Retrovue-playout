@@ -7,12 +7,21 @@
 #define RETROVUE_RENDERER_FRAME_RENDERER_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <thread>
 
 #include "retrovue/buffer/FrameRingBuffer.h"
+namespace retrovue::telemetry {
+struct ChannelMetrics;
+class MetricsExporter;
+}  // namespace retrovue::telemetry
+
+namespace retrovue::timing {
+class MasterClock;
+}  // namespace retrovue::timing
 
 namespace retrovue::renderer {
 
@@ -43,6 +52,7 @@ struct RenderStats {
   uint64_t frames_rendered;
   uint64_t frames_skipped;
   uint64_t frames_dropped;
+  uint64_t corrections_total;
   double average_render_time_ms;
   double current_render_fps;
   double frame_gap_ms;  // Time since last frame
@@ -51,6 +61,7 @@ struct RenderStats {
       : frames_rendered(0),
         frames_skipped(0),
         frames_dropped(0),
+        corrections_total(0),
         average_render_time_ms(0.0),
         current_render_fps(0.0),
         frame_gap_ms(0.0) {}
@@ -96,11 +107,18 @@ class FrameRenderer {
   // Factory method to create appropriate renderer based on mode.
   static std::unique_ptr<FrameRenderer> Create(
       const RenderConfig& config,
-      buffer::FrameRingBuffer& input_buffer);
+      buffer::FrameRingBuffer& input_buffer,
+      const std::shared_ptr<timing::MasterClock>& clock,
+      const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+      int32_t channel_id);
 
  protected:
   // Protected constructor - use factory method.
-  FrameRenderer(const RenderConfig& config, buffer::FrameRingBuffer& input_buffer);
+  FrameRenderer(const RenderConfig& config,
+                buffer::FrameRingBuffer& input_buffer,
+                const std::shared_ptr<timing::MasterClock>& clock,
+                const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                int32_t channel_id);
 
   // Main render loop (runs in render thread).
   void RenderLoop();
@@ -119,10 +137,15 @@ class FrameRenderer {
 
   // Updates renderer statistics.
   void UpdateStats(double render_time_ms, double frame_gap_ms);
+  void PublishMetrics(double frame_gap_ms);
 
   RenderConfig config_;
   buffer::FrameRingBuffer& input_buffer_;
   RenderStats stats_;
+
+  std::shared_ptr<timing::MasterClock> clock_;
+  std::shared_ptr<telemetry::MetricsExporter> metrics_;
+  int32_t channel_id_;
 
   std::atomic<bool> running_;
   std::atomic<bool> stop_requested_;
@@ -136,7 +159,11 @@ class FrameRenderer {
 // Used in production environments where no display is available.
 class HeadlessRenderer : public FrameRenderer {
  public:
-  HeadlessRenderer(const RenderConfig& config, buffer::FrameRingBuffer& input_buffer);
+  HeadlessRenderer(const RenderConfig& config,
+                   buffer::FrameRingBuffer& input_buffer,
+                   const std::shared_ptr<timing::MasterClock>& clock,
+                   const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                   int32_t channel_id);
   ~HeadlessRenderer() override;
 
  protected:
@@ -149,7 +176,11 @@ class HeadlessRenderer : public FrameRenderer {
 // Used for development and debugging.
 class PreviewRenderer : public FrameRenderer {
  public:
-  PreviewRenderer(const RenderConfig& config, buffer::FrameRingBuffer& input_buffer);
+  PreviewRenderer(const RenderConfig& config,
+                  buffer::FrameRingBuffer& input_buffer,
+                  const std::shared_ptr<timing::MasterClock>& clock,
+                  const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                  int32_t channel_id);
   ~PreviewRenderer() override;
 
  protected:

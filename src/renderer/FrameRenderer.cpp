@@ -5,9 +5,19 @@
 
 #include "retrovue/renderer/FrameRenderer.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #ifdef RETROVUE_SDL2_AVAILABLE
 extern "C" {
@@ -15,40 +25,54 @@ extern "C" {
 }
 #endif
 
+#include "retrovue/telemetry/MetricsExporter.h"
+#include "retrovue/timing/MasterClock.h"
+
 namespace retrovue::renderer {
 
-// ============================================================================
-// FrameRenderer (Base Class)
-// ============================================================================
+namespace {
+constexpr double kWaitFudgeSeconds = 0.001;          // wake a millisecond early
+constexpr double kDropThresholdSeconds = -0.008;     // drop when we are 8 ms late
+constexpr int kMinDepthForDrop = 5;                  // keep buffer from starving
+constexpr int64_t kSpinThresholdUs = 200;            // busy wait for last 0.2 ms
+constexpr std::chrono::microseconds kSpinSleep(100); // spin sleep granularity
+}  // namespace
 
 FrameRenderer::FrameRenderer(const RenderConfig& config,
-                             buffer::FrameRingBuffer& input_buffer)
+                             buffer::FrameRingBuffer& input_buffer,
+                             const std::shared_ptr<timing::MasterClock>& clock,
+                             const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                             int32_t channel_id)
     : config_(config),
       input_buffer_(input_buffer),
+      clock_(clock),
+      metrics_(metrics),
+      channel_id_(channel_id),
       running_(false),
       stop_requested_(false),
-      last_pts_(0) {
-}
+      last_pts_(0) {}
 
-FrameRenderer::~FrameRenderer() {
-  Stop();
-}
+FrameRenderer::~FrameRenderer() { Stop(); }
 
 std::unique_ptr<FrameRenderer> FrameRenderer::Create(
-    const RenderConfig& config,
-    buffer::FrameRingBuffer& input_buffer) {
-  
+    const RenderConfig& config, buffer::FrameRingBuffer& input_buffer,
+    const std::shared_ptr<timing::MasterClock>& clock,
+    const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+    int32_t channel_id) {
   if (config.mode == RenderMode::PREVIEW) {
 #ifdef RETROVUE_SDL2_AVAILABLE
-    return std::make_unique<PreviewRenderer>(config, input_buffer);
+    return std::make_unique<PreviewRenderer>(config, input_buffer, clock, metrics,
+                                             channel_id);
 #else
     std::cerr << "[FrameRenderer] WARNING: SDL2 not available, using headless mode"
               << std::endl;
-    return std::make_unique<HeadlessRenderer>(config, input_buffer);
+    return std::make_unique<HeadlessRenderer>(config, input_buffer, clock, metrics,
+                                              channel_id);
 #endif
   }
-  
-  return std::make_unique<HeadlessRenderer>(config, input_buffer);
+
+  return std::make_unique<HeadlessRenderer>(config, input_buffer, clock, metrics,
+                                            channel_id);
 }
 
 bool FrameRenderer::Start() {
@@ -104,27 +128,66 @@ void FrameRenderer::RenderLoop() {
     // Try to pop a frame from the buffer
     buffer::Frame frame;
     if (!input_buffer_.Pop(frame)) {
-      // Buffer empty - wait a bit
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       stats_.frames_skipped++;
       continue;
     }
 
-    // Calculate frame gap
-    auto now = std::chrono::steady_clock::now();
-    double frame_gap_ms = std::chrono::duration<double, std::milli>(
-        now - last_frame_time_).count();
-    last_frame_time_ = now;
+    double frame_gap_ms = 0.0;
+    if (clock_) {
+      const int64_t deadline_utc = clock_->scheduled_to_utc_us(frame.metadata.pts);
+      const int64_t now_utc = clock_->now_utc_us();
+      const int64_t gap_us = deadline_utc - now_utc;
+      const double gap_s = static_cast<double>(gap_us) / 1'000'000.0;
+      frame_gap_ms = gap_s * 1000.0;
 
-    // Render the frame
+      if (gap_s > 0.0) {
+        const double sleep_s = std::max(0.0, gap_s - kWaitFudgeSeconds);
+        if (sleep_s > 0.0) {
+#ifdef _WIN32
+          HANDLE timer = CreateWaitableTimer(nullptr, TRUE, nullptr);
+          if (timer) {
+            LARGE_INTEGER due_time;
+            due_time.QuadPart = static_cast<LONGLONG>(-sleep_s * 10'000'000.0);
+            SetWaitableTimer(timer, &due_time, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(timer, INFINITE);
+            CloseHandle(timer);
+          } else {
+            std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
+          }
+#else
+          std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
+#endif
+        }
+
+        int64_t remaining_us =
+            clock_->scheduled_to_utc_us(frame.metadata.pts) - clock_->now_utc_us();
+        while (remaining_us > kSpinThresholdUs) {
+          std::this_thread::sleep_for(kSpinSleep);
+          remaining_us =
+              clock_->scheduled_to_utc_us(frame.metadata.pts) - clock_->now_utc_us();
+        }
+      } else if (gap_s < kDropThresholdSeconds &&
+                 input_buffer_.Size() > kMinDepthForDrop) {
+        stats_.frames_dropped++;
+        stats_.corrections_total++;
+        PublishMetrics(frame_gap_ms);
+        continue;
+      }
+    } else {
+      auto now = std::chrono::steady_clock::now();
+      frame_gap_ms =
+          std::chrono::duration<double, std::milli>(now - last_frame_time_).count();
+      last_frame_time_ = now;
+    }
+
     RenderFrame(frame);
 
-    // Update statistics
     auto frame_end = std::chrono::steady_clock::now();
-    double render_time_ms = std::chrono::duration<double, std::milli>(
-        frame_end - frame_start).count();
-    
+    double render_time_ms =
+        std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
     UpdateStats(render_time_ms, frame_gap_ms);
+    PublishMetrics(frame_gap_ms);
 
     // Log progress periodically
     if (stats_.frames_rendered % 100 == 0) {
@@ -135,6 +198,7 @@ void FrameRenderer::RenderLoop() {
     }
 
     last_pts_ = frame.metadata.pts;
+    last_frame_time_ = frame_end;
   }
 
   // Cleanup renderer
@@ -159,14 +223,32 @@ void FrameRenderer::UpdateStats(double render_time_ms, double frame_gap_ms) {
   }
 }
 
+void FrameRenderer::PublishMetrics(double frame_gap_ms) {
+  if (!metrics_) {
+    return;
+  }
+
+  telemetry::ChannelMetrics snapshot;
+  if (!metrics_->GetChannelMetrics(channel_id_, snapshot)) {
+    snapshot = telemetry::ChannelMetrics{};
+  }
+
+  snapshot.buffer_depth_frames = input_buffer_.Size();
+  snapshot.frame_gap_seconds = frame_gap_ms / 1000.0;
+  snapshot.corrections_total = stats_.corrections_total;
+  metrics_->UpdateChannelMetrics(channel_id_, snapshot);
+}
+
 // ============================================================================
 // HeadlessRenderer
 // ============================================================================
 
 HeadlessRenderer::HeadlessRenderer(const RenderConfig& config,
-                                   buffer::FrameRingBuffer& input_buffer)
-    : FrameRenderer(config, input_buffer) {
-}
+                                   buffer::FrameRingBuffer& input_buffer,
+                                   const std::shared_ptr<timing::MasterClock>& clock,
+                                   const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                                   int32_t channel_id)
+    : FrameRenderer(config, input_buffer, clock, metrics, channel_id) {}
 
 HeadlessRenderer::~HeadlessRenderer() {
 }
@@ -196,8 +278,11 @@ void HeadlessRenderer::Cleanup() {
 #ifdef RETROVUE_SDL2_AVAILABLE
 
 PreviewRenderer::PreviewRenderer(const RenderConfig& config,
-                                 buffer::FrameRingBuffer& input_buffer)
-    : FrameRenderer(config, input_buffer),
+                                 buffer::FrameRingBuffer& input_buffer,
+                                 const std::shared_ptr<timing::MasterClock>& clock,
+                                 const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                                 int32_t channel_id)
+    : FrameRenderer(config, input_buffer, clock, metrics, channel_id),
       window_(nullptr),
       renderer_(nullptr),
       texture_(nullptr) {
@@ -334,8 +419,11 @@ void PreviewRenderer::Cleanup() {
 // Stub implementations when SDL2 not available
 
 PreviewRenderer::PreviewRenderer(const RenderConfig& config,
-                                 buffer::FrameRingBuffer& input_buffer)
-    : FrameRenderer(config, input_buffer),
+                                 buffer::FrameRingBuffer& input_buffer,
+                                 const std::shared_ptr<timing::MasterClock>& clock,
+                                 const std::shared_ptr<telemetry::MetricsExporter>& metrics,
+                                 int32_t channel_id)
+    : FrameRenderer(config, input_buffer, clock, metrics, channel_id),
       window_(nullptr),
       renderer_(nullptr),
       texture_(nullptr) {

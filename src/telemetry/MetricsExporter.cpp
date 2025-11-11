@@ -143,6 +143,13 @@ std::string MetricsExporter::GenerateMetricsText() const {
     oss << "retrovue_playout_decode_failure_count{channel=\"" << channel_id 
         << "\"} " << metrics.decode_failure_count << "\n";
   }
+
+  oss << "\n# HELP retrovue_playout_corrections_total Total timing corrections applied\n";
+  oss << "# TYPE retrovue_playout_corrections_total counter\n";
+  for (const auto& [channel_id, metrics] : channel_metrics_) {
+    oss << "retrovue_playout_corrections_total{channel=\"" << channel_id << "\"} "
+        << metrics.corrections_total << "\n";
+  }
   
   return oss.str();
 }
