@@ -1,0 +1,3 @@
+[submodule "docs/_standards"]
+	path = docs/_standards
+	url = https://github.com/slbailey/retrovue-doc-standards
