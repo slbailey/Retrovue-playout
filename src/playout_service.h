@@ -17,6 +17,7 @@
 #include "retrovue/decode/FrameProducer.h"
 #include "retrovue/renderer/FrameRenderer.h"
 #include "retrovue/telemetry/MetricsExporter.h"
+#include "retrovue/timing/MasterClock.h"
 
 namespace retrovue {
 namespace playout {
@@ -41,7 +42,8 @@ struct ChannelWorker {
 class PlayoutControlImpl final : public PlayoutControl::Service {
  public:
   // Constructs the service with a shared metrics exporter.
-  explicit PlayoutControlImpl(std::shared_ptr<telemetry::MetricsExporter> metrics_exporter);
+  PlayoutControlImpl(std::shared_ptr<telemetry::MetricsExporter> metrics_exporter,
+                     std::shared_ptr<timing::MasterClock> master_clock);
   ~PlayoutControlImpl() override;
 
   // Disable copy and move
@@ -71,6 +73,7 @@ class PlayoutControlImpl final : public PlayoutControl::Service {
 
   // Metrics exporter (shared across all channels)
   std::shared_ptr<telemetry::MetricsExporter> metrics_exporter_;
+  std::shared_ptr<timing::MasterClock> master_clock_;
   
   // Active channel workers
   std::mutex channels_mutex_;

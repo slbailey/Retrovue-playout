@@ -7,6 +7,7 @@
 
 #include <iostream>
 #include <string>
+#include <utility>
 
 namespace retrovue {
 namespace playout {
@@ -14,13 +15,17 @@ namespace playout {
 namespace {
 constexpr char kApiVersion[] = "1.0.0";
 constexpr size_t kDefaultBufferSize = 60;  // 60 frames (~2 seconds at 30fps)
+constexpr double kPpmDivisor = 1'000'000.0;
 }  // namespace
 
 PlayoutControlImpl::PlayoutControlImpl(
-    std::shared_ptr<telemetry::MetricsExporter> metrics_exporter)
-    : metrics_exporter_(metrics_exporter) {
-  std::cout << "[PlayoutControlImpl] Service initialized (API version: " << kApiVersion << ")"
-            << std::endl;
+    std::shared_ptr<telemetry::MetricsExporter> metrics_exporter,
+    std::shared_ptr<timing::MasterClock> master_clock)
+    : metrics_exporter_(std::move(metrics_exporter)),
+      master_clock_(std::move(master_clock)) {
+  std::cout << "[PlayoutControlImpl] Service initialized (API version: " << kApiVersion
+            << ", drift ppm: "
+            << (master_clock_ ? master_clock_->drift_ppm() : 0.0) << ")" << std::endl;
 }
 
 PlayoutControlImpl::~PlayoutControlImpl() {
@@ -298,7 +303,8 @@ void PlayoutControlImpl::UpdateChannelMetrics(int32_t channel_id) {
   }
   
   // Frame gap calculation would go here (requires MasterClock integration)
-  metrics.frame_gap_seconds = 0.0;
+  metrics.frame_gap_seconds =
+      master_clock_ ? master_clock_->drift_ppm() / kPpmDivisor : 0.0;
   
   metrics_exporter_->UpdateChannelMetrics(channel_id, metrics);
 }

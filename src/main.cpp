@@ -3,6 +3,7 @@
 // Purpose: Main entry point for the RetroVue playout engine.
 // Copyright (c) 2025 RetroVue
 
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -13,6 +14,7 @@
 
 #include "playout_service.h"
 #include "retrovue/telemetry/MetricsExporter.h"
+#include "retrovue/timing/MasterClock.h"
 
 namespace {
 
@@ -57,8 +59,12 @@ void RunServer(const ServerConfig& config) {
     return;
   }
 
+  const auto epoch_now = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::system_clock::now().time_since_epoch());
+  auto master_clock = retrovue::timing::MakeSystemMasterClock(epoch_now.count(), 0.0);
+
   // Create the service implementation
-  retrovue::playout::PlayoutControlImpl service(metrics_exporter);
+  retrovue::playout::PlayoutControlImpl service(metrics_exporter, master_clock);
 
   // Enable health checking and reflection
   grpc::EnableDefaultHealthCheckService(true);

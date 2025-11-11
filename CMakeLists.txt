@@ -92,6 +92,9 @@ add_executable(retrovue_playout
     src/renderer/FrameRenderer.cpp
     src/telemetry/MetricsExporter.cpp
     src/telemetry/MetricsHTTPServer.cpp
+    src/timing/SystemMasterClock.cpp
+    src/timing/TestMasterClock.cpp
+    src/timing/TestMasterClock.h
     include/retrovue/buffer/FrameRingBuffer.h
     include/retrovue/decode/FrameProducer.h
     include/retrovue/decode/FFmpegDecoder.h
