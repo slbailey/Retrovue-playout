@@ -45,16 +45,29 @@ public:
   void RequestTeardown(ChannelRuntime& runtime,
                        retrovue::telemetry::MetricsExporter& exporter,
                        const std::string& reason,
-                       std::chrono::milliseconds timeout = std::chrono::milliseconds(500))
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds(500),
+                       bool remove_metrics = true)
   {
     if (runtime.producer)
     {
       runtime.producer->RequestTeardown(timeout);
     }
 
+    // Wait for producer to stop and drain buffer
     const auto start = std::chrono::steady_clock::now();
     while (runtime.producer && runtime.producer->IsRunning())
     {
+      // During teardown, drain the buffer periodically to help it empty
+      if (runtime.buffer && !runtime.buffer->IsEmpty())
+      {
+        retrovue::buffer::Frame frame;
+        // Pop a few frames to help drainage
+        for (int i = 0; i < 5 && runtime.buffer->Pop(frame); ++i)
+        {
+          // Drain frames
+        }
+      }
+      
       if (std::chrono::steady_clock::now() - start > timeout)
       {
         std::cerr << "[ChannelManagerStub] Teardown timed out for channel "
@@ -70,15 +83,31 @@ public:
       runtime.producer->Stop();
     }
 
+    // Final drain of any remaining frames in buffer
+    if (runtime.buffer)
+    {
+      retrovue::buffer::Frame frame;
+      while (runtime.buffer->Pop(frame))
+      {
+        // Drain all remaining frames
+      }
+    }
+
     runtime.state = retrovue::telemetry::ChannelState::STOPPED;
     exporter.SubmitChannelMetrics(runtime.channel_id, ToMetrics(runtime));
-    exporter.SubmitChannelRemoval(runtime.channel_id);
+    
+    if (remove_metrics)
+    {
+      exporter.SubmitChannelRemoval(runtime.channel_id);
+    }
   }
 
   void StopChannel(ChannelRuntime& runtime,
                    retrovue::telemetry::MetricsExporter& exporter)
   {
-    RequestTeardown(runtime, exporter, "ChannelManagerStub::StopChannel");
+    // StopChannel should keep metrics with STOPPED state (for BC-005, BC-003)
+    RequestTeardown(runtime, exporter, "ChannelManagerStub::StopChannel", 
+                    std::chrono::milliseconds(500), /*remove_metrics=*/false);
     if (runtime.buffer)
     {
       runtime.buffer->Clear();

@@ -30,6 +30,57 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-release",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-relwithdebinfo",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     }
   ],
   "buildPresets": [
@@ -40,6 +91,18 @@
     {
       "name": "windows-release-build",
       "configurePreset": "windows-release"
+    },
+    {
+      "name": "linux-debug-build",
+      "configurePreset": "linux-debug"
+    },
+    {
+      "name": "linux-release-build",
+      "configurePreset": "linux-release"
+    },
+    {
+      "name": "linux-relwithdebinfo-build",
+      "configurePreset": "linux-relwithdebinfo"
     },
     {
       "name": "windows-debug-tests",
@@ -68,6 +131,34 @@
         "integration_frame_cadence_tests",
         "timing_soak"
       ]
+    },
+    {
+      "name": "linux-debug-tests",
+      "configurePreset": "linux-debug",
+      "targets": [
+        "test_buffer",
+        "test_decode",
+        "contracts_masterclock_tests",
+        "contracts_metricsandtiming_tests",
+        "contracts_playoutengine_tests",
+        "contracts_renderer_tests",
+        "integration_frame_cadence_tests",
+        "timing_soak"
+      ]
+    },
+    {
+      "name": "linux-release-tests",
+      "configurePreset": "linux-release",
+      "targets": [
+        "test_buffer",
+        "test_decode",
+        "contracts_masterclock_tests",
+        "contracts_metricsandtiming_tests",
+        "contracts_playoutengine_tests",
+        "contracts_renderer_tests",
+        "integration_frame_cadence_tests",
+        "timing_soak"
+      ]
     }
   ],
   "testPresets": [
@@ -81,6 +172,20 @@
     {
       "name": "windows-release-ctest",
       "configurePreset": "windows-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-debug-ctest",
+      "configurePreset": "linux-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-release-ctest",
+      "configurePreset": "linux-release",
       "output": {
         "outputOnFailure": true
       }

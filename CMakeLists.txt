@@ -5,9 +5,34 @@ project(retrovue_air LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Protobuf CONFIG REQUIRED)
-find_package(gRPC CONFIG REQUIRED)
-find_package(GTest CONFIG)
+# Try CONFIG mode first (vcpkg), then fall back to MODULE mode (system packages)
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+    find_package(Protobuf REQUIRED)
+endif()
+
+find_package(gRPC CONFIG QUIET)
+if(NOT gRPC_FOUND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET
+        grpc++
+        grpc
+        grpc_unsecure
+    )
+    # Create aliases for compatibility
+    if(TARGET PkgConfig::GRPC)
+        add_library(gRPC::grpc++ ALIAS PkgConfig::GRPC)
+        add_library(gRPC::grpc++_reflection ALIAS PkgConfig::GRPC)
+        # Find protoc and grpc_cpp_plugin
+        find_program(PROTOC_PROGRAM protoc REQUIRED)
+        find_program(GRPC_CPP_PLUGIN_PROGRAM grpc_cpp_plugin REQUIRED)
+    endif()
+endif()
+
+find_package(GTest CONFIG QUIET)
+if(NOT GTest_FOUND)
+    find_package(GTest QUIET)
+endif()
 
 # FFmpeg libraries for Phase 3 video decoding (optional)
 find_package(PkgConfig)
@@ -229,6 +254,18 @@ if(GTest_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
+    if(FFMPEG_FOUND)
+        target_link_libraries(contracts_masterclock_tests PRIVATE PkgConfig::FFMPEG)
+    endif()
+
+    if(SDL2_FOUND)
+        target_link_libraries(contracts_masterclock_tests PRIVATE SDL2::SDL2 SDL2::SDL2main)
+    endif()
+
+    if(NOT WIN32)
+        target_link_libraries(contracts_masterclock_tests PRIVATE Threads::Threads)
+    endif()
+
     add_test(NAME contracts_masterclock COMMAND contracts_masterclock_tests)
 
     # Contract Tests: Metrics & Timing
@@ -257,6 +294,10 @@ if(GTest_FOUND)
 
     if(FFMPEG_FOUND)
         target_link_libraries(contracts_metricsandtiming_tests PRIVATE PkgConfig::FFMPEG)
+    endif()
+
+    if(SDL2_FOUND)
+        target_link_libraries(contracts_metricsandtiming_tests PRIVATE SDL2::SDL2 SDL2::SDL2main)
     endif()
 
     if(NOT WIN32)
@@ -381,6 +422,10 @@ if(GTest_FOUND)
 
     if(FFMPEG_FOUND)
         target_link_libraries(contracts_playoutengine_tests PRIVATE PkgConfig::FFMPEG)
+    endif()
+
+    if(SDL2_FOUND)
+        target_link_libraries(contracts_playoutengine_tests PRIVATE SDL2::SDL2 SDL2::SDL2main)
     endif()
 
     if(NOT WIN32)

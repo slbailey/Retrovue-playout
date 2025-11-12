@@ -40,10 +40,16 @@ def find_vcpkg_toolchain():
     common_paths = [
         Path.home() / "source" / "vcpkg",
         Path.home() / "vcpkg",
-        Path("C:/vcpkg"),
-        Path("C:/tools/vcpkg"),
         repo_root.parent / "vcpkg",
+        Path("/usr/local/vcpkg"),
+        Path("/opt/vcpkg"),
     ]
+    # Windows-specific paths (only check on Windows)
+    if os.name == "nt":
+        common_paths.extend([
+            Path("C:/vcpkg"),
+            Path("C:/tools/vcpkg"),
+        ])
     
     for base_path in common_paths:
         toolchain = base_path / "scripts" / "buildsystems" / "vcpkg.cmake"

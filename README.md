@@ -54,8 +54,8 @@ cmake --build build --config RelWithDebInfo
 ```
 
 ```bash
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-cmake --build build --config RelWithDebInfo
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j$(nproc)
 ```
 
 ### Run and smoke-test
@@ -66,7 +66,10 @@ python scripts\test_server.py
 ```
 
 ```bash
-./build/RelWithDebInfo/retrovue_playout --port 50051
+# On Linux, binaries are typically in build/ directly (not in a subdirectory)
+./build/retrovue_air --port 50051
+# Or if using CMake with RelWithDebInfo:
+./build/RelWithDebInfo/retrovue_air --port 50051
 python scripts/test_server.py
 ```
 

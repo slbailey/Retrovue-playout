@@ -120,7 +120,28 @@ if __name__ == "__main__":
     
     # Check if server is running
     print("\n[INFO] Make sure the server is running:")
-    print("    .\\build\\Debug\\retrovue_playout.exe\n")
+    import platform
+    if platform.system() == "Windows":
+        print("    .\\build\\RelWithDebInfo\\retrovue_playout.exe\n")
+    else:
+        # Try to find the binary in common build locations
+        import os
+        from pathlib import Path
+        build_paths = [
+            Path("build/retrovue_air"),
+            Path("build/RelWithDebInfo/retrovue_air"),
+            Path("build/Debug/retrovue_air"),
+            Path("build/Release/retrovue_air"),
+            Path("out/build/linux-relwithdebinfo/retrovue_air"),
+        ]
+        found = False
+        for path in build_paths:
+            if path.exists():
+                print(f"    {path}\n")
+                found = True
+                break
+        if not found:
+            print("    ./build/retrovue_air (or build/RelWithDebInfo/retrovue_air)\n")
     
     input("Press Enter to start tests...")
     

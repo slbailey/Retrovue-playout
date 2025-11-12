@@ -35,6 +35,8 @@ class VideoFileDecoder(threading.Thread):
             packet = {
                 "img": frame,
                 "station_ts": next_station_ts,
+                "frame_number": self.decoded,
+                "pts": cap.get(cv2.CAP_PROP_POS_FRAMES) - 1,  # 0-indexed frame number
             }
 
             self.ring.push(packet)

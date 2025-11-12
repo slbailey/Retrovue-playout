@@ -7,6 +7,7 @@
 #include "retrovue/telemetry/MetricsHTTPServer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <sstream>
 

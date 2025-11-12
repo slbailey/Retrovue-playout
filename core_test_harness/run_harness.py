@@ -14,6 +14,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=5.0, help="Duration to run (seconds)")
     ap.add_argument("--fps", type=float, default=30.0, help="Target render FPS")
     ap.add_argument("--capacity", type=int, default=120, help="Ring buffer capacity (frames)")
+    ap.add_argument("--verbose", action="store_true", help="Verbose output (show all late frames)")
+    ap.add_argument("--no-late-summary", action="store_true", help="Don't show late frame summary")
     args = ap.parse_args()
 
     # Core components
@@ -27,7 +29,7 @@ def main():
     decoder.start()
 
     # Run the renderer in the main thread
-    renderer = RendererStub(ring, clock, target_fps=args.fps)
+    renderer = RendererStub(ring, clock, target_fps=args.fps, verbose=args.verbose)
     renderer.run_for(args.seconds)
 
     # Signal decoder to stop and wait for it
@@ -44,8 +46,19 @@ def main():
         "ring_drops": getattr(ring, "drop_count", 0),
         "decoded_frames": decoder.decoded,
     }
+    
+    # Add late frame statistics if available
+    if metrics.get("late_frames"):
+        stats["late_frames"] = metrics["late_frames"]
 
+    print("\n" + "="*60)
+    print("Test Harness Results")
+    print("="*60)
     print(stats)
+    
+    # Print late frame summary (unless disabled)
+    if not args.no_late_summary:
+        renderer.print_late_frame_summary()
 
 
 if __name__ == "__main__":

@@ -25,11 +25,11 @@ cmake --build build --config RelWithDebInfo
 - Linux (Bash):
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build -- -j$(nproc)
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j$(nproc)
 ```
 
-- Generated binaries default to `build/retrovue_playout[.exe]`.
+- Generated binaries default to `build/retrovue_air` (or `build/RelWithDebInfo/retrovue_air` depending on build type).
 
 ## Tests
 
