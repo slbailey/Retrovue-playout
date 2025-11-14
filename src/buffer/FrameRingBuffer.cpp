@@ -38,6 +38,18 @@ bool FrameRingBuffer::Push(const Frame& frame) {
   return true;
 }
 
+const Frame* FrameRingBuffer::Peek() const {
+  const uint32_t current_read = read_index_.load(std::memory_order_acquire);
+  
+  // Check if buffer is empty
+  if (current_read == write_index_.load(std::memory_order_acquire)) {
+    return nullptr;  // Buffer empty
+  }
+  
+  // Return pointer to frame (non-destructive read)
+  return &buffer_[current_read];
+}
+
 bool FrameRingBuffer::Pop(Frame& frame) {
   const uint32_t current_read = read_index_.load(std::memory_order_relaxed);
   

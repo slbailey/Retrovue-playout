@@ -42,7 +42,8 @@ cmake --build build -j$(nproc) --target \
     contracts_playoutcontrol_tests \
     contracts_orchestrationloop_tests \
     contracts_playoutengine_tests \
-    contracts_renderer_tests
+    contracts_renderer_tests \
+    contracts_videofileproducer_tests
 
 # Run tests
 echo ""

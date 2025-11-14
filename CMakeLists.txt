@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(retrovue_air LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Try CONFIG mode first (vcpkg), then fall back to MODULE mode (system packages)
@@ -108,52 +108,22 @@ target_link_libraries(retrovue_air_proto_check
 target_include_directories(retrovue_air_proto_check
     PRIVATE ${GENERATED_DIR})
 
-# Main playout engine executable
+# Main ffmpeg wrapper executable (Phase 1: CLI wrapper)
 add_executable(retrovue_air
-    src/main.cpp
-    src/playout_service.cpp
-    src/buffer/FrameRingBuffer.cpp
-    src/decode/FrameProducer.cpp
-    src/decode/FFmpegDecoder.cpp
-    src/renderer/FrameRenderer.cpp
-    src/runtime/OrchestrationLoop.cpp
-    src/runtime/PlayoutControlStateMachine.cpp
-    src/telemetry/MetricsExporter.cpp
-    src/telemetry/MetricsHTTPServer.cpp
-    src/timing/SystemMasterClock.cpp
-    src/timing/TestMasterClock.cpp
-    include/retrovue/buffer/FrameRingBuffer.h
-    include/retrovue/decode/FrameProducer.h
-    include/retrovue/decode/FFmpegDecoder.h
-    include/retrovue/renderer/FrameRenderer.h
-    include/retrovue/runtime/OrchestrationLoop.h
-    include/retrovue/runtime/PlayoutControlStateMachine.h
-    include/retrovue/telemetry/MetricsExporter.h
-    include/retrovue/telemetry/MetricsHTTPServer.h)
+    src/main.cpp)
 
-target_link_libraries(retrovue_air
-    PRIVATE 
-        retrovue_air_proto)
+# Set output directory
+set_target_properties(retrovue_air PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-target_compile_definitions(retrovue_air
-    PRIVATE
-        RETROVUE_TIMING_STRICT=ON)
+# Enable typical warnings
+target_compile_options(retrovue_air PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Werror=return-type)
 
-if(FFMPEG_FOUND)
-    target_link_libraries(retrovue_air PRIVATE PkgConfig::FFMPEG)
-endif()
-
-# SDL2 libraries for Phase 3 preview renderer (optional)
-find_package(SDL2 CONFIG)
-if(SDL2_FOUND)
-    message(STATUS "SDL2 found - preview renderer enabled")
-    add_compile_definitions(RETROVUE_SDL2_AVAILABLE)
-    target_link_libraries(retrovue_air PRIVATE SDL2::SDL2 SDL2::SDL2main)
-else()
-    message(WARNING "SDL2 not found - preview renderer disabled. Install SDL2 for preview window support.")
-endif()
-
-# Platform-specific socket libraries for HTTP server
+# Platform-specific socket libraries
 if(WIN32)
     # Winsock is linked automatically via pragma comment in source
 else()
@@ -166,8 +136,7 @@ target_include_directories(retrovue_air
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${GENERATED_DIR})
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Unit tests (optional - requires GTest via vcpkg)
 if(GTest_FOUND)
@@ -476,6 +445,115 @@ if(GTest_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
     add_test(NAME contracts_renderer COMMAND contracts_renderer_tests)
+
+    # Contract Tests: Video File Producer
+    add_executable(contracts_videofileproducer_tests
+        tests/ContractRegistry.cpp
+        tests/contracts/ContractRegistryEnvironment.cpp
+        tests/contracts/ContractRegistrySanityTest.cpp
+        tests/contracts/video_file_producer/VideoFileProducerContractTests.cpp
+        src/producers/video_file/VideoFileProducer.cpp
+        src/buffer/FrameRingBuffer.cpp
+        src/timing/SystemMasterClock.cpp
+        src/timing/TestMasterClock.cpp)
+
+    target_link_libraries(contracts_videofileproducer_tests
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(contracts_videofileproducer_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    if(FFMPEG_FOUND)
+        target_link_libraries(contracts_videofileproducer_tests PRIVATE PkgConfig::FFMPEG)
+        target_compile_definitions(contracts_videofileproducer_tests PRIVATE RETROVUE_FFMPEG_AVAILABLE)
+    endif()
+
+    target_include_directories(contracts_videofileproducer_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    if(NOT WIN32)
+        target_link_libraries(contracts_videofileproducer_tests PRIVATE Threads::Threads)
+    endif()
+
+    add_test(NAME contracts_videofileproducer COMMAND contracts_videofileproducer_tests)
+
+    # Contract Tests: MPEG-TS Playout Sink
+    add_executable(contracts_mpegtsplayoutsink_tests
+        tests/ContractRegistry.cpp
+        tests/contracts/ContractRegistryEnvironment.cpp
+        tests/contracts/ContractRegistrySanityTest.cpp
+        tests/contracts/MpegTSPlayoutSink/MpegTSPlayoutSinkContractTests.cpp
+        src/buffer/FrameRingBuffer.cpp
+        src/sinks/mpegts/MpegTSPlayoutSink.cpp
+        src/producers/video_file/VideoFileProducer.cpp
+        src/timing/SystemMasterClock.cpp
+        src/timing/TestMasterClock.cpp)
+
+    target_link_libraries(contracts_mpegtsplayoutsink_tests
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(contracts_mpegtsplayoutsink_tests
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    if(FFMPEG_FOUND)
+        target_link_libraries(contracts_mpegtsplayoutsink_tests PRIVATE PkgConfig::FFMPEG)
+        target_compile_definitions(contracts_mpegtsplayoutsink_tests PRIVATE RETROVUE_FFMPEG_AVAILABLE)
+    endif()
+
+    target_include_directories(contracts_mpegtsplayoutsink_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    if(NOT WIN32)
+        target_link_libraries(contracts_mpegtsplayoutsink_tests PRIVATE Threads::Threads)
+    endif()
+
+    add_test(NAME contracts_mpegtsplayoutsink COMMAND contracts_mpegtsplayoutsink_tests)
+
+    # Unit Tests: MPEG-TS Playout Sink
+    add_executable(test_sink
+        tests/test_sink.cpp
+        src/buffer/FrameRingBuffer.cpp
+        src/sinks/mpegts/MpegTSPlayoutSink.cpp
+        src/timing/SystemMasterClock.cpp
+        src/timing/TestMasterClock.cpp)
+
+    target_link_libraries(test_sink
+        PRIVATE
+            GTest::gtest
+            GTest::gtest_main)
+
+    target_compile_definitions(test_sink
+        PRIVATE
+            RETROVUE_TIMING_STRICT=ON)
+
+    if(FFMPEG_FOUND)
+        target_link_libraries(test_sink PRIVATE PkgConfig::FFMPEG)
+        target_compile_definitions(test_sink PRIVATE RETROVUE_FFMPEG_AVAILABLE)
+    endif()
+
+    target_include_directories(test_sink
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    if(NOT WIN32)
+        target_link_libraries(test_sink PRIVATE Threads::Threads)
+    endif()
+
+    add_test(NAME test_sink COMMAND test_sink)
 
     # Integration Test: Frame Cadence
     add_executable(integration_frame_cadence_tests

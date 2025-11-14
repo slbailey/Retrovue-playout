@@ -79,6 +79,12 @@ namespace retrovue::buffer
     // Thread-safe for single consumer.
     bool Pop(Frame &frame);
 
+    // Peeks at the next frame without removing it.
+    // Returns pointer to frame if available, nullptr if buffer is empty.
+    // Thread-safe for single consumer.
+    // Note: The returned pointer is only valid until the next Pop() or Push().
+    const Frame* Peek() const;
+
     // Returns the current number of frames in the buffer.
     // This is an approximate count due to concurrent access.
     size_t Size() const;

@@ -45,7 +45,20 @@ std::map<std::string, std::vector<std::string>> ExpectedCoverage()
         "FE-002",
         "FE-003",
         "FE-004",
-        "FE-005"}}};
+        "FE-005"}},
+      {"VideoFileProducer",
+       {"FE-001",
+        "FE-002",
+        "FE-003",
+        "FE-004",
+        "FE-005",
+        "FE-006",
+        "FE-007",
+        "FE-008",
+        "FE-009",
+        "FE-010",
+        "FE-011",
+        "FE-012"}}};
 }
 
 TEST(ContractRegistry, AllRulesCovered)
