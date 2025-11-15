@@ -42,6 +42,11 @@ class PTSController {
   // Only valid after reset() has been called.
   int64_t GetFirstFrameWallclockUs() const;
 
+  // Resets the PTS controller for a new producer.
+  // Called when switching from preview to live to reset PTS offset,
+  // continuity counter state, and frame timing history.
+  void resetForNewProducer();
+
  private:
   int64_t pts_base_90k_;              // Base PTS in 90kHz units
   int64_t first_frame_wallclock_us_;   // Wall clock time of first frame

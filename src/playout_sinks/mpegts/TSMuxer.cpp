@@ -95,6 +95,15 @@ bool TSMuxer::Flush() {
   return true;  // TODO: Return actual result
 }
 
+void TSMuxer::resetForNewProducer() {
+  // Reset continuity counter state and frame timing history
+  // TODO: When FFmpeg muxer is implemented, reset:
+  // - Continuity counters for video/audio streams
+  // - Frame timing history
+  // - Any buffered packets
+  std::cout << "[TSMuxer] Reset for new producer" << std::endl;
+}
+
 }  // namespace retrovue::playout_sinks::mpegts
 
 

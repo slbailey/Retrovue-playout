@@ -23,6 +23,10 @@ namespace retrovue::timing {
 class MasterClock;
 }  // namespace retrovue::timing
 
+namespace retrovue::producers {
+class IProducer;
+}  // namespace retrovue::producers
+
 namespace retrovue::renderer {
 
 // RenderMode specifies the rendering output type.
@@ -103,6 +107,14 @@ class FrameRenderer {
 
   // Gets current render statistics.
   const RenderStats& GetStats() const { return stats_; }
+
+  // Sets the producer (for switching between preview and live).
+  // This is called when switching producers to update the renderer's reference.
+  void setProducer(producers::IProducer* producer);
+
+  // Resets the renderer pipeline (flushes buffers, resets timestamp state).
+  // Called when switching producers to ensure clean state.
+  void resetPipeline();
 
   // Factory method to create appropriate renderer based on mode.
   static std::unique_ptr<FrameRenderer> Create(

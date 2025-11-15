@@ -28,6 +28,9 @@ service PlayoutControl {
   rpc StartChannel(StartChannelRequest) returns (StartChannelResponse);
   rpc UpdatePlan(UpdatePlanRequest) returns (UpdatePlanResponse);
   rpc StopChannel(StopChannelRequest) returns (StopChannelResponse);
+  rpc GetVersion(ApiVersionRequest) returns (ApiVersion);
+  rpc LoadPreview(LoadPreviewRequest) returns (LoadPreviewResponse);
+  rpc SwitchToLive(SwitchToLiveRequest) returns (SwitchToLiveResponse);
 }
 ```
 
@@ -86,6 +89,7 @@ Hot-swap the currently running playout plan without restarting the worker.
 
 - Drain the current decode queue.
 - Reload asset map and resume decoding from the next valid timestamp.
+- **Note**: `resetPipeline()` may be called by PlayoutEngine during plan updates to reset renderer state, but this is NOT done during seamless producer switching (`SwitchToLive`).
 - _Expected downtime: ≤ 500 ms._
 
 ---
@@ -112,6 +116,105 @@ Gracefully shut down an active channel worker.
 
 - Flush frame queue, stop decode threads, release all `libav*` resources.
 - Set channel state as `retrovue_playout_channel_state{channel="N"} = "stopped"`.
+
+---
+
+### LoadPreview
+
+**Purpose:**  
+Load a producer into the preview slot in **shadow decode mode**. The producer decodes frames internally but does not write to the ring buffer until switched to live. This enables seamless switching with PTS continuity.
+
+**Request**
+
+| Field        | Type   | Description                                    |
+| ------------ | ------ | ---------------------------------------------- |
+| `channel_id` | int32  | Target channel identifier                      |
+| `path`       | string | File path to the asset                         |
+| `asset_id`   | string | Unique identifier for the asset                |
+
+**Response**
+
+| Field           | Type   | Description                              |
+| --------------- | ------ | ---------------------------------------- |
+| `success`       | bool   | Indicates whether preview load succeeded |
+| `message`       | string | (optional) Human-readable status message  |
+
+**Behavior:**
+- Producer is created and started in **shadow decode mode** (decodes frames but does not write to buffer)
+- Producer decodes first frame and caches it for seamless switching
+- Preview slot is ready for switching once shadow decode is complete (first frame decoded)
+- Live slot remains unchanged (continues outputting frames)
+- Ring buffer persists (not flushed during preview load)
+- If a preview producer already exists, it is destroyed before loading the new one
+- On failure, returns `success=false` with error message
+
+---
+
+### SwitchToLive
+
+**Purpose:**  
+Seamlessly switch the preview slot producer to the live slot at ring buffer boundary with **perfect PTS continuity**. This implements the seamless switch algorithm: aligns PTS, swaps writer, and activates preview as live without flushing buffers or resetting renderer.
+
+**Request**
+
+| Field        | Type   | Description                                          |
+| ------------ | ------ | ---------------------------------------------------- |
+| `channel_id` | int32  | Target channel identifier                            |
+| `asset_id`   | string | Asset ID that should be switched to live (must match preview slot) |
+
+**Response**
+
+| Field           | Type   | Description                              |
+| --------------- | ------ | ---------------------------------------- |
+| `success`       | bool   | Indicates whether switch succeeded       |
+| `message`       | string | (optional) Human-readable status message |
+
+**Behavior:**
+- **Seamless Switch Algorithm**:
+  1. Verify preview producer has decoded first frame (shadow decode ready)
+  2. Get last PTS from live producer: `last_live_pts`
+  3. Align preview producer PTS: `preview_first_pts = last_live_pts + frame_duration`
+  4. Exit shadow mode (preview producer begins writing to buffer)
+  5. Stop live producer gracefully (wind down)
+  6. Move preview producer to live slot
+- **Critical Requirements**:
+  - Ring buffer is **NOT flushed** (persists through switch)
+  - Renderer pipeline is **NOT reset** (continues reading seamlessly)
+  - PTS continuity is **mandatory** (no jumps, no resets to zero)
+  - Last live frame and first preview frame appear back-to-back in buffer
+  - No visual discontinuity, no black frames, no stutter
+- **Expected switch time**: ≤ 100ms for seamless playout
+- On failure, returns `success=false` with error message
+
+---
+
+## Pipeline Reset Behavior
+
+**Critical Clarification**: `resetPipeline()` is **NOT** called during seamless producer switching. The renderer continues reading seamlessly from the ring buffer during `SwitchToLive` operations.
+
+### When `resetPipeline()` IS Called
+
+`resetPipeline()` is called by PlayoutEngine in the following scenarios:
+
+1. **Plan Updates** (`UpdatePlan`): When a new playout plan is loaded, the renderer pipeline may be reset to clear stale frames and reset timestamp state.
+2. **Channel Restart**: When a channel is restarted after an error or manual restart.
+3. **Major Error Recovery**: When a hard reset is required due to unrecoverable errors.
+
+### When `resetPipeline()` is NOT Called
+
+`resetPipeline()` is **explicitly NOT called** during:
+
+1. **Seamless Producer Switching** (`SwitchToLive`): 
+   - FrameRouter handles the switch by pulling the last frame from the live producer and the first frame from the preview producer
+   - Both frames are written consecutively into the ring buffer with continuous PTS
+   - Renderer continues reading seamlessly without any pipeline reset
+   - This ensures no visual discontinuity, no black frames, and perfect PTS continuity
+
+**Architecture Rationale**:
+- Seamless switching is handled upstream by FrameRouter
+- FrameRouter ensures the ring buffer contains the last LIVE frame and first PREVIEW frame consecutively
+- Renderer continues reading from the buffer without interruption
+- `resetPipeline()` would break seamless switching by clearing the buffer and resetting timestamps
 
 ---
 
@@ -344,7 +447,86 @@ StopChannelResponse response = service->StopChannel(request);
 
 ---
 
-### LT-005: Buffer Underrun Recovery
+### LT-005: LoadPreview Sequence
+
+**Scenario**: `LoadPreview` → Preview slot loaded, ready for switching
+
+**Setup**:
+1. Start channel with initial asset
+2. Channel reaches `ready` state
+3. Prepare new asset for preview
+
+**Execution**:
+```cpp
+LoadPreviewRequest request;
+request.set_channel_id(1);
+request.set_path("/path/to/preview.mp4");
+request.set_asset_id("preview-asset-123");
+
+LoadPreviewResponse response = service->LoadPreview(request);
+```
+
+**Assertions**:
+- `response.success() == true`
+- Preview slot contains producer with correct asset_id
+- Preview producer is running in **shadow decode mode** (decodes frames but FrameRouter does not pull from it)
+- Preview producer has decoded first frame (shadow decode ready, frames available via pull API)
+- Live slot remains unchanged (FrameRouter continues pulling from live producer)
+- Ring buffer persists (not flushed during preview load)
+- FrameRouter continues pulling from live producer and writing to buffer
+
+**Failure Cases**:
+- Invalid channel_id → `success=false`, `NOT_FOUND` status
+- Invalid path → `success=false`, `INTERNAL` status
+- Producer factory not set → `success=false`, error message
+
+---
+
+### LT-006: SwitchToLive Sequence
+
+**Scenario**: `SwitchToLive` → Preview becomes live, seamless transition
+
+**Setup**:
+1. Channel with live producer running
+2. Preview asset loaded via `LoadPreview`
+3. Channel in `Playing` state
+
+**Execution**:
+```cpp
+SwitchToLiveRequest request;
+request.set_channel_id(1);
+request.set_asset_id("preview-asset-123");
+
+SwitchToLiveResponse response = service->SwitchToLive(request);
+```
+
+**Assertions**:
+- `response.success() == true`
+- Preview producer shadow decode is ready (first frame decoded)
+- Preview producer PTS is aligned: `preview_first_pts = live_last_pts + frame_duration`
+- **Slot switching occurs at a frame boundary, and the engine guarantees that the final LIVE frame and first PREVIEW frame are placed consecutively in the output ring buffer with no discontinuity in timing or PTS.**
+- FrameRouter pulls last frame from live producer via `nextFrame()` and writes to buffer
+- FrameRouter switches which producer it pulls from (atomic switch: `router.active_producer = preview`)
+- Preview producer exits shadow mode and begins exposing frames via pull API
+- Old live producer is stopped gracefully
+- Preview producer moved to live slot
+- Preview slot is reset (empty)
+- **Ring buffer persists** (not flushed during switch)
+- **Renderer pipeline is NOT reset** (continues reading seamlessly)
+- FrameRingBuffer contains: `[last_live_frame][first_preview_frame][...]` with continuous PTS
+- **PTS continuity maintained** (no jumps, no resets to zero, no negative deltas)
+- No visual discontinuity, no black frames, no stutter
+- Switch completes within 100ms
+
+**Failure Cases**:
+- Invalid channel_id → `success=false`, `NOT_FOUND` status
+- Asset ID mismatch → `success=false`, `INVALID_ARGUMENT` status
+- No preview loaded → `success=false`, error message
+- Producer start fails → `success=false`, `INTERNAL` status
+
+---
+
+### LT-007: Buffer Underrun Recovery
 
 **Scenario**: Consumer outpaces producer, buffer underruns
 

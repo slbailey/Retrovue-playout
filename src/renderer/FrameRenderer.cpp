@@ -40,13 +40,19 @@ constexpr int64_t kEmptyBufferBackoffUs = 5'000;           // MC-004: allow prod
 constexpr int64_t kErrorBackoffUs = 10'000;                // MC-004 recovery assistance
 
 inline void WaitUntilUtc(const std::shared_ptr<timing::MasterClock>& clock,
-                         int64_t target_utc_us) {
+                         int64_t target_utc_us,
+                         const std::atomic<bool>* stop_flag = nullptr) {
   if (!clock || target_utc_us <= 0) {
     return;
   }
 
   // MC-003: Align renderer pacing with MasterClock monotonic schedule.
   while (true) {
+    // Check stop flag if provided
+    if (stop_flag && stop_flag->load(std::memory_order_acquire)) {
+      break;
+    }
+
     const int64_t now = clock->now_utc_us();
     const int64_t remaining = target_utc_us - now;
     if (remaining <= 0) {
@@ -61,15 +67,26 @@ inline void WaitUntilUtc(const std::shared_ptr<timing::MasterClock>& clock,
 }
 
 inline void WaitForMicros(const std::shared_ptr<timing::MasterClock>& clock,
-                          int64_t duration_us) {
+                          int64_t duration_us,
+                          const std::atomic<bool>* stop_flag = nullptr) {
   if (duration_us <= 0) {
     return;
   }
   if (clock) {
-    WaitUntilUtc(clock, clock->now_utc_us() + duration_us);
+    WaitUntilUtc(clock, clock->now_utc_us() + duration_us, stop_flag);
     return;
   }
-  std::this_thread::sleep_for(std::chrono::microseconds(duration_us));
+  // For non-clock case, check stop flag periodically
+  const int64_t chunk_us = 1'000; // Check every 1ms
+  int64_t remaining_us = duration_us;
+  while (remaining_us > 0) {
+    if (stop_flag && stop_flag->load(std::memory_order_acquire)) {
+      break;
+    }
+    const int64_t sleep_us = std::min<int64_t>(remaining_us, chunk_us);
+    std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+    remaining_us -= sleep_us;
+  }
 }
 
 inline int64_t WaitFudgeUs() {
@@ -203,7 +220,7 @@ void FrameRenderer::RenderLoop() {
     // Try to pop a frame from the buffer
     buffer::Frame frame;
     if (!input_buffer_.Pop(frame)) {
-      WaitForMicros(clock_, kEmptyBufferBackoffUs);  // MC-004: allow producer to refill
+      WaitForMicros(clock_, kEmptyBufferBackoffUs, &stop_requested_);  // MC-004: allow producer to refill
       stats_.frames_skipped++;
       continue;
     }
@@ -220,14 +237,14 @@ void FrameRenderer::RenderLoop() {
         const int64_t deadline_utc =
             clock_->scheduled_to_utc_us(frame.metadata.pts);
         const int64_t target_utc = deadline_utc - WaitFudgeUs();
-        WaitUntilUtc(clock_, target_utc);  // MC-003: pace rendering to MasterClock
+        WaitUntilUtc(clock_, target_utc, &stop_requested_);  // MC-003: pace rendering to MasterClock
 
         int64_t remaining_us =
             clock_->scheduled_to_utc_us(frame.metadata.pts) - clock_->now_utc_us();
-        while (remaining_us > kSpinThresholdUs) {
+        while (remaining_us > kSpinThresholdUs && !stop_requested_.load(std::memory_order_acquire)) {
           const int64_t spin_us =
               std::min<int64_t>(remaining_us / 2, kSpinSleepUs);
-          WaitForMicros(clock_, spin_us);
+          WaitForMicros(clock_, spin_us, &stop_requested_);
           remaining_us =
               clock_->scheduled_to_utc_us(frame.metadata.pts) - clock_->now_utc_us();
         }
@@ -317,6 +334,30 @@ void FrameRenderer::PublishMetrics(double frame_gap_ms) {
   snapshot.frame_gap_seconds = frame_gap_ms / 1000.0;
   snapshot.corrections_total = stats_.corrections_total;
   metrics_->SubmitChannelMetrics(channel_id_, snapshot);
+}
+
+void FrameRenderer::setProducer(producers::IProducer* producer) {
+  // Note: Renderer doesn't need to store producer reference since it reads from buffer.
+  // This method exists for API compatibility and future extensions.
+  (void)producer;  // Unused for now
+  std::cout << "[FrameRenderer] Producer reference updated" << std::endl;
+}
+
+void FrameRenderer::resetPipeline() {
+  std::cout << "[FrameRenderer] Resetting pipeline..." << std::endl;
+  
+  // Flush ring buffer (clear all pending frames)
+  input_buffer_.Clear();
+  
+  // Reset timestamp state
+  last_pts_ = 0;
+  if (clock_) {
+    last_frame_time_utc_ = clock_->now_utc_us();
+  } else {
+    fallback_last_frame_time_ = std::chrono::steady_clock::now();
+  }
+  
+  std::cout << "[FrameRenderer] Pipeline reset complete" << std::endl;
 }
 
 // ============================================================================

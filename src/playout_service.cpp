@@ -5,10 +5,17 @@
 
 #include "playout_service.h"
 
+#include <atomic>
+#include <condition_variable>
+#include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
+
+#include "retrovue/producers/video_file/VideoFileProducer.h"
+#include "retrovue/runtime/ProducerSlot.h"
 
 namespace retrovue
 {
@@ -140,24 +147,132 @@ namespace retrovue
       // Initialize ring buffer
       worker->ring_buffer = std::make_unique<buffer::FrameRingBuffer>(kDefaultBufferSize);
 
-      // Configure frame producer
-      decode::ProducerConfig producer_config;
-      producer_config.asset_uri = plan_handle; // Use plan_handle as asset URI for now
-      producer_config.target_width = 1920;
-      producer_config.target_height = 1080;
-      producer_config.target_fps = 30.0;
-      producer_config.stub_mode = false; // Phase 3: real decode (falls back to stub if FFmpeg unavailable)
+      // Initialize playout control state machine
+      worker->control = std::make_unique<runtime::PlayoutControlStateMachine>();
+      worker->control->BeginSession(MakeCommandId("begin", channel_id), request_time);
 
-      // Create producer
-      worker->producer = std::make_unique<decode::FrameProducer>(
-          producer_config, *worker->ring_buffer, master_clock_);
+      // Set producer factory for creating VideoFileProducer instances
+      // Check for fake video mode
+      const char *fake_video = std::getenv("AIR_FAKE_VIDEO");
+      bool stub_mode = (fake_video != nullptr && std::string(fake_video) == "1");
 
-      // Start decode thread
-      if (!worker->producer->Start())
+      // Create condition variable and flag for shadow decode readiness
+      auto shadow_decode_ready = std::make_shared<std::atomic<bool>>(false);
+      auto shadow_decode_cv = std::make_shared<std::condition_variable>();
+      auto shadow_decode_mutex = std::make_shared<std::mutex>();
+
+      worker->control->setProducerFactory(
+          [stub_mode, shadow_decode_ready, shadow_decode_cv, shadow_decode_mutex, channel_id](
+              const std::string &p, const std::string &aid,
+              buffer::FrameRingBuffer &rb, std::shared_ptr<timing::MasterClock> clk)
+              -> std::unique_ptr<producers::IProducer> {
+            producers::video_file::ProducerConfig config;
+            config.asset_uri = p;
+            config.target_width = 1920;
+            config.target_height = 1080;
+            config.target_fps = 30.0;
+            config.stub_mode = stub_mode;
+
+            // Set up event callback to listen for ShadowDecodeReady
+            producers::video_file::ProducerEventCallback event_callback =
+                [shadow_decode_ready, shadow_decode_cv, shadow_decode_mutex, channel_id](
+                    const std::string &event_type, const std::string &message) {
+                  if (event_type == "ShadowDecodeReady")
+                  {
+                    std::lock_guard<std::mutex> lock(*shadow_decode_mutex);
+                    shadow_decode_ready->store(true, std::memory_order_release);
+                    shadow_decode_cv->notify_all();
+                    std::cout << "[PlayoutControlImpl] ProducerEvent::ShadowDecodeReady(channelId=" 
+                              << channel_id << ", slotId=preview)" << std::endl;
+                  }
+                };
+
+            return std::make_unique<producers::video_file::VideoFileProducer>(
+                config, rb, clk, event_callback);
+          });
+
+      // For backward compatibility: load first asset directly into live slot
+      // (If upstream uses LoadPreview/SwitchToLive, this path is not used)
+      std::string asset_id = "start-" + std::to_string(channel_id);
+      
+      // Reset the flag before loading (in case event fires during load)
+      shadow_decode_ready->store(false, std::memory_order_release);
+      
+      if (!worker->control->loadPreviewAsset(plan_handle, asset_id, *worker->ring_buffer, master_clock_))
       {
         response->set_success(false);
-        response->set_message("Failed to start frame producer");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "Producer start failed");
+        response->set_message("Failed to load initial asset");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "Asset load failed");
+      }
+
+      // Check if shadow decode is already ready (may happen in stub mode)
+      const auto &preview_slot = worker->control->getPreviewSlot();
+      if (preview_slot.loaded && preview_slot.producer)
+      {
+        auto* video_producer = dynamic_cast<producers::video_file::VideoFileProducer*>(
+            preview_slot.producer.get());
+        if (video_producer && video_producer->IsShadowDecodeReady())
+        {
+          // Already ready, no need to wait
+          shadow_decode_ready->store(true, std::memory_order_release);
+        }
+      }
+
+      // Wait for shadow decode readiness before activating
+      {
+        std::cout << "[StartChannel] Waiting for shadow decode readiness..." << std::endl;
+        std::unique_lock<std::mutex> lock(*shadow_decode_mutex);
+        const auto timeout = std::chrono::seconds(5); // 5 second timeout
+        bool ready = shadow_decode_cv->wait_for(
+            lock, timeout,
+            [shadow_decode_ready] { return shadow_decode_ready->load(std::memory_order_acquire); });
+
+        if (!ready)
+        {
+          // Double-check using IsShadowDecodeReady as fallback
+          const auto &preview_slot_check = worker->control->getPreviewSlot();
+          if (preview_slot_check.loaded && preview_slot_check.producer)
+          {
+            auto* video_producer = dynamic_cast<producers::video_file::VideoFileProducer*>(
+                preview_slot_check.producer.get());
+            if (video_producer && video_producer->IsShadowDecodeReady())
+            {
+              // Ready but event didn't fire, proceed anyway
+              ready = true;
+            }
+          }
+          
+          if (!ready)
+          {
+            response->set_success(false);
+            response->set_message("Timeout waiting for shadow decode readiness");
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "Shadow decode timeout");
+          }
+        }
+      } // Lock released here
+
+      // Activate preview as live (backward compatibility: first asset goes live immediately)
+      if (!worker->control->activatePreviewAsLive())
+      {
+        response->set_success(false);
+        response->set_message("Failed to activate initial asset");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "Activation failed");
+      }
+
+      // Start the live producer (if not already running)
+      // Note: Producer is already started when loaded into preview slot
+      const auto &live_slot = worker->control->getLiveSlot();
+      if (live_slot.loaded && live_slot.producer)
+      {
+        if (!live_slot.producer->isRunning())
+        {
+          if (!live_slot.producer->start())
+          {
+            response->set_success(false);
+            response->set_message("Failed to start frame producer");
+            return grpc::Status(grpc::StatusCode::INTERNAL, "Producer start failed");
+          }
+        }
       }
 
       // Configure and create renderer (Phase 3)
@@ -169,10 +284,6 @@ namespace retrovue
 
       worker->renderer = renderer::FrameRenderer::Create(
           render_config, *worker->ring_buffer, master_clock_, metrics_exporter_, channel_id);
-
-      // Initialize playout control state machine
-      worker->control = std::make_unique<runtime::PlayoutControlStateMachine>();
-      worker->control->BeginSession(MakeCommandId("begin", channel_id), request_time);
 
       // Start render thread
       if (!worker->renderer->Start())
@@ -188,7 +299,7 @@ namespace retrovue
       worker->overrun_active = std::make_shared<std::atomic<bool>>(false);
 
       runtime::OrchestrationLoop::Config loop_config;
-      loop_config.target_fps = producer_config.target_fps;
+      loop_config.target_fps = 30.0; // Default FPS
       loop_config.max_tick_skew_ms = 1.5; // Allow slight tolerance in production
 
       auto loop = std::make_unique<runtime::OrchestrationLoop>(
@@ -545,6 +656,132 @@ namespace retrovue
       return grpc::Status::OK;
     }
 
+    grpc::Status PlayoutControlImpl::LoadPreview(grpc::ServerContext *context,
+                                                 const LoadPreviewRequest *request,
+                                                 LoadPreviewResponse *response)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+
+      const int32_t channel_id = request->channel_id();
+      const std::string &path = request->path();
+      const std::string &asset_id = request->asset_id();
+
+      std::cout << "[LoadPreview] Request received: channel_id=" << channel_id
+                << ", path=" << path << ", asset_id=" << asset_id << std::endl;
+
+      // Check if channel exists
+      auto it = active_channels_.find(channel_id);
+      if (it == active_channels_.end())
+      {
+        response->set_success(false);
+        response->set_message("Channel not found");
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
+      }
+
+      auto &worker = it->second;
+
+      // Check if state machine has producer factory set
+      if (!worker->control)
+      {
+        response->set_success(false);
+        response->set_message("State machine not initialized");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "State machine not available");
+      }
+
+      // Set producer factory if not already set
+      // Factory creates VideoFileProducer instances
+      worker->control->setProducerFactory(
+          [](const std::string &p, const std::string &aid,
+             buffer::FrameRingBuffer &rb, std::shared_ptr<timing::MasterClock> clk)
+              -> std::unique_ptr<producers::IProducer> {
+            // Check for fake video mode
+            const char *fake_video = std::getenv("AIR_FAKE_VIDEO");
+            bool stub_mode = (fake_video != nullptr && std::string(fake_video) == "1");
+
+            producers::video_file::ProducerConfig config;
+            config.asset_uri = p;
+            config.target_width = 1920;
+            config.target_height = 1080;
+            config.target_fps = 30.0;
+            config.stub_mode = stub_mode;
+
+            return std::make_unique<producers::video_file::VideoFileProducer>(
+                config, rb, clk, nullptr);
+          });
+
+      // Load preview asset
+      if (!worker->control->loadPreviewAsset(path, asset_id, *worker->ring_buffer, master_clock_))
+      {
+        response->set_success(false);
+        response->set_message("Failed to load preview asset");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "Preview load failed");
+      }
+
+      response->set_success(true);
+      response->set_message("Preview asset loaded successfully");
+      std::cout << "[LoadPreview] Preview asset loaded: " << asset_id << std::endl;
+      return grpc::Status::OK;
+    }
+
+    grpc::Status PlayoutControlImpl::SwitchToLive(grpc::ServerContext *context,
+                                                  const SwitchToLiveRequest *request,
+                                                  SwitchToLiveResponse *response)
+    {
+      std::lock_guard<std::mutex> lock(channels_mutex_);
+
+      const int32_t channel_id = request->channel_id();
+      const std::string &asset_id = request->asset_id();
+
+      std::cout << "[SwitchToLive] Request received: channel_id=" << channel_id
+                << ", asset_id=" << asset_id << std::endl;
+
+      // Check if channel exists
+      auto it = active_channels_.find(channel_id);
+      if (it == active_channels_.end())
+      {
+        response->set_success(false);
+        response->set_message("Channel not found");
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "Channel is not running");
+      }
+
+      auto &worker = it->second;
+
+      if (!worker->control)
+      {
+        response->set_success(false);
+        response->set_message("State machine not initialized");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "State machine not available");
+      }
+
+      // Verify asset_id matches preview slot
+      const auto &preview_slot = worker->control->getPreviewSlot();
+      if (!preview_slot.loaded || preview_slot.asset_id != asset_id)
+      {
+        response->set_success(false);
+        response->set_message("Preview asset ID mismatch or no preview loaded");
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Asset ID mismatch");
+      }
+
+      // Activate preview as live (seamless switch - no renderer reset)
+      // The switch algorithm handles PTS alignment and shadow mode exit
+      // Renderer continues reading seamlessly from ring buffer
+      // Note: Preview producer is already running (in shadow mode), so no need to start it again
+      if (!worker->control->activatePreviewAsLive(worker->renderer.get()))
+      {
+        response->set_success(false);
+        response->set_message("Failed to activate preview as live");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "Switch failed");
+      }
+
+      // Producer is already running (was in shadow mode, now writing to buffer)
+      // No need to start it again
+
+      response->set_success(true);
+      response->set_message("Switched to live successfully");
+      std::cout << "[SwitchToLive] Switched to live: " << asset_id << std::endl;
+      return grpc::Status::OK;
+    }
+
     void PlayoutControlImpl::RequestTeardown(int32_t channel_id, const std::string& reason)
     {
       std::lock_guard<std::mutex> lock(channels_mutex_);
@@ -680,6 +917,61 @@ namespace retrovue
         worker->teardown_thread = std::thread();
       }
 
+      // Stop producers FIRST (before renderer) to prevent new frames from being produced
+      // Stop producers in preview and live slots (new dual-producer architecture)
+      if (worker->control)
+      {
+        // Stop preview slot producer if loaded (stop even if not yet running, in case thread is starting)
+        const auto &preview_slot = worker->control->getPreviewSlot();
+        if (preview_slot.loaded && preview_slot.producer)
+        {
+          std::cout << "[StopChannel] Stopping preview producer for channel " << channel_id << std::endl;
+          auto* video_producer = dynamic_cast<producers::video_file::VideoFileProducer*>(
+              preview_slot.producer.get());
+          if (video_producer)
+          {
+            // Force stop to ensure quick shutdown (even if thread hasn't started yet)
+            video_producer->ForceStop();
+          }
+          // Always call stop() to ensure producer is stopped, even if isRunning() is false
+          preview_slot.producer->stop();
+          
+          // Wait briefly for thread to join (with timeout)
+          int wait_count = 0;
+          while (preview_slot.producer->isRunning() && wait_count < 50)
+          {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            wait_count++;
+          }
+        }
+
+        // Stop live slot producer if loaded
+        const auto &live_slot = worker->control->getLiveSlot();
+        if (live_slot.loaded && live_slot.producer)
+        {
+          std::cout << "[StopChannel] Stopping live producer for channel " << channel_id << std::endl;
+          auto* video_producer = dynamic_cast<producers::video_file::VideoFileProducer*>(
+              live_slot.producer.get());
+          if (video_producer)
+          {
+            if (forced_teardown)
+            {
+              video_producer->ForceStop();
+            }
+          }
+          // Always call stop() to ensure producer is stopped
+          live_slot.producer->stop();
+          
+          // Wait briefly for thread to join (with timeout)
+          int wait_count = 0;
+          while (live_slot.producer->isRunning() && wait_count < 50)
+          {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            wait_count++;
+          }
+        }
+      }
+
       if (worker->renderer)
       {
         std::cout << "[StopChannel] Stopping renderer for channel " << channel_id << std::endl;
@@ -692,13 +984,14 @@ namespace retrovue
         worker->orchestration_loop.reset();
       }
 
+      // Stop legacy producer if it exists (backward compatibility)
       if (worker->producer)
       {
         if (forced_teardown)
         {
           worker->producer->ForceStop();
         }
-        std::cout << "[StopChannel] Stopping producer for channel " << channel_id << std::endl;
+        std::cout << "[StopChannel] Stopping legacy producer for channel " << channel_id << std::endl;
         worker->producer->Stop();
       }
 

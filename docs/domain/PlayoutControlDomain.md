@@ -11,6 +11,7 @@ Define the real-time session control responsibilities for channel playout, inclu
 ## Role in runtime
 
 - Owns the authoritative state machine for every channel/session.
+- Manages dual-producer slots (preview and live) for seamless asset switching.
 - Issues lifecycle commands to `FrameProducer`, `Renderer`, and supporting services while preserving MasterClock alignment.
 - Mediates external control inputs (automation, operator UI, API) and validates ordering/latency requirements before forwarding to runtime components.
 
@@ -49,9 +50,10 @@ Define the real-time session control responsibilities for channel playout, inclu
 ## Integration points
 
 - **MasterClock** – Provides UTC deadlines and drift data so control commands align with timing guarantees.
-- **FrameProducer** – Receives start/stop/seek signals and produces frames accordingly.
-- **Renderer** – Pauses or resumes output when instructed, respecting frame boundary semantics.
+- **FrameProducer** – Receives start/stop/seek signals and produces frames accordingly. Managed via dual-producer slots (preview/live).
+- **Renderer** – Pauses or resumes output when instructed, respecting frame boundary semantics. Supports pipeline reset for producer switching.
 - **MetricsExporter** – Emits control-path latency, state transition counters, and error telemetry.
+- **ProducerSlot** – Manages producer instances in preview and live slots, enabling seamless switching.
 
 ## Interfaces
 
@@ -84,6 +86,16 @@ Define the real-time session control responsibilities for channel playout, inclu
   - Effects: initiates producer drain, keeps PaceController ticks active, records teardown start time.
   - Postconditions: `playout_control_teardown_duration_ms` logged once producer signals stopped; if timeout exceeded, escalates to forced stop and increments `playout_control_latency_violation_total`.
 - `GetState(channel_id)` – Returns current control state with timestamps for auditing; side-effect free.
+- `loadPreviewAsset(path, assetId, ringBuffer, clock)` – Loads a producer into the preview slot in shadow decode mode.
+  - Preconditions: Producer factory must be set via `setProducerFactory()`.
+  - Effects: Creates producer for specified asset, destroys any existing preview producer, starts producer in shadow decode mode (decodes frames but does not write to buffer), stores in preview slot.
+  - Postconditions: Preview slot contains producer running in shadow mode with first frame decoded and cached; live slot unchanged.
+- `activatePreviewAsLive(renderer)` – Seamlessly switches preview slot producer to live slot at ring buffer boundary.
+  - Preconditions: Preview slot must be loaded with a producer that has decoded at least one frame (shadow decode complete).
+  - Effects: Aligns preview producer PTS to continue from live producer's last PTS, atomically swaps ring buffer writer pointer, preview producer exits shadow mode and begins writing, live producer stops gracefully.
+  - Postconditions: Live slot contains the producer; preview slot is empty; ring buffer persists with continuous frame stream; renderer continues seamlessly with no reset.
+  - **Constraint**: Slot switching occurs at a frame boundary, and the engine guarantees that the final LIVE frame and first PREVIEW frame are placed consecutively in the output ring buffer with no discontinuity in timing or PTS.
+- `getPreviewSlot()` / `getLiveSlot()` – Returns const reference to preview/live slot for inspection; side-effect free.
 
 ## Guarantees
 
@@ -92,6 +104,14 @@ Define the real-time session control responsibilities for channel playout, inclu
 - Commands processed serially per channel (`command_sequence` monotonic) to guarantee determinism under concurrent automation input.
 - Seek operations flush stale frames and guarantee a deterministic resume PTS.
 - Idempotency enforced via `(channel_id, command_id)` deduplication window of 60 s.
+- **Slot switching occurs at a frame boundary, and the engine guarantees that the final LIVE frame and first PREVIEW frame are placed consecutively in the output ring buffer with no discontinuity in timing or PTS.**
+- Producer switching happens at ring buffer boundary with **perfect PTS continuity** (no jumps, no resets).
+- Preview slot producer runs in **shadow decode mode** (decodes frames but does not write to buffer until switched).
+- Ring buffer **persists through switches** (never flushed during switch).
+- Renderer pipeline **does NOT reset** on switch (continues reading seamlessly).
+- Preview producer's first frame PTS = live producer's last PTS + frame_duration (mandatory continuity).
+- Last live frame and first preview frame appear back-to-back in ring buffer with no gap.
+- Only the live slot producer writes frames to the ring buffer; preview slot producer is isolated until switch.
 
 ## Failure modes
 

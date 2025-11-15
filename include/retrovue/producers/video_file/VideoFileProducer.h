@@ -116,6 +116,24 @@ namespace retrovue::producers::video_file
     // Returns current producer state.
     ProducerState GetState() const;
 
+    // Shadow decode mode support (for seamless switching)
+    // Sets shadow decode mode (decodes frames but does not write to buffer).
+    void SetShadowDecodeMode(bool enabled);
+
+    // Returns true if shadow decode mode is enabled.
+    bool IsShadowDecodeMode() const;
+
+    // Returns true if shadow decode is ready (first frame decoded and cached).
+    bool IsShadowDecodeReady() const;
+
+    // Gets the next PTS that will be used for the next frame (for PTS alignment).
+    // Returns the PTS that the next decoded frame will have.
+    int64_t GetNextPTS() const;
+
+    // Aligns PTS to continue from a target PTS (for seamless switching).
+    // Sets the PTS offset so that the next frame will have target_pts.
+    void AlignPTS(int64_t target_pts);
+
   private:
     // Main production loop (runs in producer thread).
     void ProduceLoop();
@@ -178,6 +196,13 @@ namespace retrovue::producers::video_file
     std::atomic<int64_t> stub_pts_counter_;
     int64_t frame_interval_us_;
     std::atomic<int64_t> next_stub_deadline_utc_;
+
+    // Shadow decode mode support
+    std::atomic<bool> shadow_decode_mode_;
+    std::atomic<bool> shadow_decode_ready_;
+    std::mutex shadow_decode_mutex_;
+    std::unique_ptr<buffer::Frame> cached_first_frame_;  // First decoded frame (cached in shadow mode)
+    int64_t pts_offset_us_;  // PTS offset for alignment (added to frame PTS)
   };
 
 } // namespace retrovue::producers::video_file

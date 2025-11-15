@@ -265,12 +265,27 @@ if(GTest_FOUND)
         tests/contracts/ContractRegistryEnvironment.cpp
         tests/contracts/ContractRegistrySanityTest.cpp
         tests/contracts/PlayoutControl/PlayoutControlContractTests.cpp
-        src/runtime/PlayoutControlStateMachine.cpp)
+        src/runtime/PlayoutControlStateMachine.cpp
+        src/runtime/ProducerSlot.cpp
+        src/buffer/FrameRingBuffer.cpp
+        src/producers/video_file/VideoFileProducer.cpp
+        src/timing/TestMasterClock.cpp)
 
     target_link_libraries(contracts_playoutcontrol_tests
         PRIVATE
             GTest::gtest
             GTest::gtest_main)
+
+    if(FFMPEG_FOUND)
+        target_link_directories(contracts_playoutcontrol_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(contracts_playoutcontrol_tests PRIVATE ${FFMPEG_LIBRARIES})
+        target_include_directories(contracts_playoutcontrol_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        target_compile_options(contracts_playoutcontrol_tests PRIVATE ${FFMPEG_CFLAGS_OTHER})
+    endif()
+
+    if(NOT WIN32)
+        target_link_libraries(contracts_playoutcontrol_tests PRIVATE Threads::Threads)
+    endif()
 
     target_compile_definitions(contracts_playoutcontrol_tests
         PRIVATE
@@ -324,12 +339,18 @@ if(GTest_FOUND)
         src/telemetry/MetricsHTTPServer.cpp
         src/timing/SystemMasterClock.cpp
         src/timing/TestMasterClock.cpp
+        src/runtime/PlayoutControlStateMachine.cpp
+        src/runtime/ProducerSlot.cpp
+        src/runtime/OrchestrationLoop.cpp
+        src/producers/video_file/VideoFileProducer.cpp
+        src/playout_service.cpp
         include/retrovue/telemetry/MetricsExporter.h)
 
     target_link_libraries(contracts_playoutengine_tests
         PRIVATE
             GTest::gtest
-            GTest::gtest_main)
+            GTest::gtest_main
+            retrovue_air_proto)
 
     target_compile_definitions(contracts_playoutengine_tests
         PRIVATE

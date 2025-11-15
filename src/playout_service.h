@@ -83,6 +83,14 @@ class PlayoutControlImpl final : public PlayoutControl::Service {
                           const ApiVersionRequest* request,
                           ApiVersion* response) override;
 
+  grpc::Status LoadPreview(grpc::ServerContext* context,
+                           const LoadPreviewRequest* request,
+                           LoadPreviewResponse* response) override;
+
+  grpc::Status SwitchToLive(grpc::ServerContext* context,
+                             const SwitchToLiveRequest* request,
+                             SwitchToLiveResponse* response) override;
+
   void RequestTeardown(int32_t channel_id, const std::string& reason);
 
  private:

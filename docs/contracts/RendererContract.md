@@ -202,7 +202,46 @@ ASSERT_EQ(metrics.GetCounter("renderer_underrun_total"), 1);
 
 ---
 
-### FE-003: Mode Transition (Headless ↔ Preview)
+---
+
+### FE-003: Pipeline Reset (NOT Used During Seamless Switching)
+
+**Rule**: `resetPipeline()` method clears buffers and resets timestamp state. **This method is NOT called during seamless producer switching** - the renderer continues reading seamlessly from the ring buffer during switches.
+
+**Expected Behavior**:
+
+- `resetPipeline()` clears the FrameRingBuffer (removes all pending frames)
+- `resetPipeline()` resets internal timestamp tracking state
+- **During seamless producer switching**: Renderer does NOT call `resetPipeline()` - it continues reading frames seamlessly
+- `resetPipeline()` may be used for other scenarios (plan updates, error recovery, manual resets)
+
+**Validation**:
+
+```cpp
+// Fill buffer with frames
+for (int i = 0; i < 5; i++) {
+    buffer.Push(CreateFrame(pts = i * 33333));
+}
+
+// Reset pipeline (used for plan updates, NOT for seamless switching)
+renderer.resetPipeline();
+
+// Buffer should be cleared
+ASSERT_EQ(buffer.Size(), 0u);
+```
+
+**Note on Seamless Switching**:
+- During seamless producer switching, FrameRouter writes the final LIVE frame and first PREVIEW frame consecutively into the ring buffer
+- Renderer continues reading seamlessly without calling `resetPipeline()`
+- This ensures no visual discontinuity, no black frames, and perfect PTS continuity
+
+**Failure Modes**:
+
+- ❌ resetPipeline() called during seamless switching (should NOT happen)
+
+---
+
+### FE-004: Mode Transition (Headless ↔ Preview)
 
 **Rule**: Renderer must support hot-swap between headless and preview modes without frame loss.
 
@@ -257,7 +296,7 @@ ASSERT_EQ(metrics.GetCounter("frames_dropped_total"), 0);
 
 ---
 
-### FE-004: PTS Monotonicity Validation
+### FE-005: PTS Monotonicity Validation
 
 **Rule**: Renderer must validate that consumed frames have monotonically increasing PTS.
 
@@ -298,7 +337,7 @@ ASSERT_EQ(metrics.GetCounter("renderer_pts_violation_total"), 1);
 
 ---
 
-### FE-005: Frame Dimension Consistency
+### FE-006: Frame Dimension Consistency
 
 **Rule**: All frames consumed by a single channel must have consistent dimensions.
 
@@ -954,10 +993,11 @@ The following table defines test IDs, purposes, expected results, and success me
 | **FE-001-T01** | Functional        | Validate frame consumed at correct PTS               | Frame rendered within ±2ms of PTS          | `abs(render_time - pts) ≤ 2000 µs`          |
 | **FE-002-T01** | Functional        | Verify empty buffer returns false                    | `PullFrame()` returns false                | `result == false`                           |
 | **FE-002-T02** | Functional        | Verify underrun metric incremented                   | Underrun counter incremented               | `renderer_underrun_total == 1`              |
-| **FE-003-T01** | Functional        | Hot-swap headless → preview                          | Preview window opens, no frame loss        | `frames_dropped == 0`, window active        |
-| **FE-003-T02** | Functional        | Hot-swap preview → headless                          | Preview window closes, no frame loss       | `frames_dropped == 0`, window closed        |
-| **FE-004-T01** | Functional        | Detect non-monotonic PTS                             | Error logged, frame skipped                | `renderer_pts_violation_total == 1`         |
-| **FE-005-T01** | Functional        | Detect dimension mismatch                            | Error logged, frame skipped                | `renderer_dimension_mismatch_total == 1`    |
+| **FE-003-T01** | Functional        | Pipeline reset clears buffers                        | Buffer cleared, timestamps reset           | `buffer.Size() == 0` after reset            |
+| **FE-004-T01** | Functional        | Hot-swap headless → preview                          | Preview window opens, no frame loss        | `frames_dropped == 0`, window active        |
+| **FE-004-T02** | Functional        | Hot-swap preview → headless                          | Preview window closes, no frame loss       | `frames_dropped == 0`, window closed        |
+| **FE-005-T01** | Functional        | Detect non-monotonic PTS                             | Error logged, frame skipped                | `renderer_pts_violation_total == 1`         |
+| **FE-006-T01** | Functional        | Detect dimension mismatch                            | Error logged, frame skipped                | `renderer_dimension_mismatch_total == 1`    |
 | **PM-001-T01** | Performance       | Measure headless throughput                          | ≥ 30 fps sustained for 60s                 | `fps ≥ 30.0`                                |
 | **PM-002-T01** | Performance       | Measure frame consumption jitter                     | ≤ ±2 frames over 60s                       | `std_dev(intervals) ≤ 66666 µs`             |
 | **PM-003-T01** | Performance       | Measure frame latency (p95)                          | ≤ 16 ms                                    | `latency_p95 ≤ 16000 µs`                    |

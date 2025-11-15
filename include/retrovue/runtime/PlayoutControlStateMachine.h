@@ -11,7 +11,25 @@
 
 #include <mutex>
 
+#include <functional>
+
 #include "retrovue/runtime/OrchestrationLoop.h"
+#include "retrovue/runtime/ProducerSlot.h"
+
+namespace retrovue {
+namespace buffer {
+  class FrameRingBuffer;
+}
+namespace timing {
+  class MasterClock;
+}
+namespace producers {
+  class IProducer;
+}
+namespace renderer {
+  class FrameRenderer;
+}
+}
 
 namespace retrovue::runtime {
 
@@ -84,6 +102,37 @@ class PlayoutControlStateMachine {
   [[nodiscard]] State state() const;
   [[nodiscard]] MetricsSnapshot Snapshot() const;
 
+  // Dual-producer slot management
+  // Sets a factory function for creating producers (must be called before loadPreviewAsset).
+  // The factory receives (path, assetId, ringBuffer, clock) and returns a producer.
+  using ProducerFactory = std::function<std::unique_ptr<producers::IProducer>(
+      const std::string& path,
+      const std::string& assetId,
+      buffer::FrameRingBuffer& ringBuffer,
+      std::shared_ptr<timing::MasterClock> clock)>;
+  
+  void setProducerFactory(ProducerFactory factory);
+
+  // Loads a producer into the preview slot.
+  // Requires: setProducerFactory() must be called first, and ringBuffer/clock must be provided.
+  // Returns true on success, false on failure.
+  bool loadPreviewAsset(const std::string& path,
+                       const std::string& assetId,
+                       buffer::FrameRingBuffer& ringBuffer,
+                       std::shared_ptr<timing::MasterClock> clock);
+
+  // Switches preview slot to live slot.
+  // Stops live producer, flushes renderer, resets timestamps, and swaps producers.
+  // Requires: renderer pointer for flushing (can be nullptr if not available).
+  // Returns true on success, false on failure.
+  bool activatePreviewAsLive(renderer::FrameRenderer* renderer = nullptr);
+
+  // Gets the preview slot (const access).
+  const ProducerSlot& getPreviewSlot() const;
+
+  // Gets the live slot (const access).
+  const ProducerSlot& getLiveSlot() const;
+
  private:
   void TransitionLocked(State to, int64_t event_utc_us);
   void RecordTransitionLocked(State from, State to);
@@ -116,6 +165,13 @@ class PlayoutControlStateMachine {
   std::vector<double> seek_latencies_ms_;
   std::vector<double> stop_latencies_ms_;
   std::vector<double> pause_deviation_ms_;
+
+  // Dual-producer slots
+  ProducerSlot previewSlot;
+  ProducerSlot liveSlot;
+
+  // Producer factory (set by playout_service)
+  ProducerFactory producer_factory_;
 };
 
 }  // namespace retrovue::runtime

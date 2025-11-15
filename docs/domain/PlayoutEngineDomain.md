@@ -22,9 +22,9 @@ The playout engine domain consists of six primary entities:
 
 **Ownership**: Each Channel instance owns:
 
-- One `FrameProducer` (decode pipeline)
-- One `FrameRingBuffer` (staging queue)
-- One `FrameRenderer` reference (output consumer)
+- Two `ProducerSlot` instances (preview and live) for dual-producer switching
+- One `FrameRingBuffer` (staging queue, shared by both producers)
+- One `FrameRenderer` reference (output consumer, receives frames from live slot only)
 - One telemetry state object
 
 **Identity**: Uniquely identified by a numeric `channel_id` (int32) issued by the ChannelManager.
@@ -54,7 +54,12 @@ stateDiagram-v2
 
 **Invariants**:
 
-- A Channel must have exactly one associated `FrameProducer` and `FrameRingBuffer` when state is `ready` or `buffering`
+- A Channel must have exactly one `FrameRingBuffer` when state is `ready` or `buffering`
+- When state is `ready` or `buffering`, the live slot must contain a producer (preview slot may be empty or loaded)
+- Only the FrameRouter writes frames to the ring buffer; FrameRouter pulls from live slot producer; preview slot producer runs in shadow decode mode
+- Preview slot producer decodes frames but FrameRouter does not pull from it until switched to live
+- Ring buffer persists through producer switches (never flushed during switch)
+- PTS must be continuous across producer switches (no jumps, no resets)
 - Channel state transitions are atomic and immediately reflected in telemetry
 - Channels cannot transition from `stopped` to any other state (terminal state)
 
@@ -85,8 +90,8 @@ struct FrameMetadata {
 
 **Lifecycle**:
 
-1. **Decode**: Frame is allocated and decoded by `FrameProducer`
-2. **Stage**: Frame is pushed to `FrameRingBuffer` with metadata
+1. **Decode**: Frame is allocated and decoded by `FrameProducer` (made available via pull API)
+2. **Route**: `FrameRouter` pulls frame from active producer and writes to `FrameRingBuffer`
 3. **Consume**: Frame is popped by `FrameRenderer` for output
 4. **Release**: Frame memory is freed after rendering
 
@@ -255,30 +260,48 @@ graph TD
     CM[ChannelManager] -->|StartChannel| Channel
     CM -->|UpdatePlan| Channel
     CM -->|StopChannel| Channel
+    CM -->|LoadPreview| Channel
+    CM -->|SwitchToLive| Channel
 
-    Channel -->|owns| Producer[FrameProducer]
+    Channel -->|owns| PreviewSlot[Preview Slot]
+    Channel -->|owns| LiveSlot[Live Slot]
     Channel -->|owns| Buffer[FrameRingBuffer]
+    Channel -->|owns| FrameRouter[FrameRouter]
     Channel -->|references| Renderer
     Channel -->|publishes| Metrics
 
-    Producer -->|decodes| Frame
-    Producer -->|pushes| Buffer
+    PreviewSlot -->|contains| PreviewProducer[Preview Producer<br/>shadow decode]
+    LiveSlot -->|contains| LiveProducer[Live Producer<br/>running]
+
+    LiveProducer -->|decodes| Frame
+    PreviewProducer -->|decodes| Frame
+    FrameRouter -->|pulls from| LiveProducer
+    FrameRouter -->|writes| Buffer
     Buffer -->|stores| Frame
     Renderer -->|pulls from| Buffer
 
-    Producer -->|consumes| Plan
-    Producer -->|uses| MasterClock
+    PreviewProducer -->|consumes| Plan
+    LiveProducer -->|consumes| Plan
+    LiveProducer -->|uses| MasterClock
     Renderer -->|uses| MasterClock
     Metrics -->|uses| MasterClock
 ```
 
 **Key Relationships**:
 
-1. **Channel → FrameProducer** (1:1 ownership)
+1. **Channel → ProducerSlot** (1:2 ownership - preview and live)
 
-   - Channel creates and owns producer lifecycle
-   - Producer runs in dedicated decode thread
-   - Channel stops producer on shutdown
+   - Channel manages two producer slots: preview and live
+   - Preview slot holds next prepared asset running in **shadow decode mode**
+     - Decodes frames internally but FrameRouter does not pull from it (shadow mode)
+     - Caches first decoded frame
+     - Aligns PTS to continue from live producer's last PTS
+   - Live slot holds currently active producer (decodes frames, exposes pull API)
+   - **FrameRouter** pulls frames from live producer and writes to ring buffer
+   - Producers are created via factory pattern and can be any `IProducer` implementation
+   - Producers expose pull-based API (e.g., `nextFrame()`) - they do NOT write to buffer directly
+   - Channel stops producers on shutdown
+   - FrameRouter switches which producer it pulls from during seamless switch (no buffer flush)
 
 2. **Channel → FrameRingBuffer** (1:1 ownership)
 
@@ -291,16 +314,27 @@ graph TD
    - Multiple channels may share one Renderer
    - Renderer is owned by playout service
    - Channel holds weak reference
+   - Renderer only consumes frames from live slot producer
 
-4. **FrameProducer → Plan** (N:1 consumption)
+4. **ProducerSlot → IProducer** (1:1 ownership per slot)
+
+   - Preview slot: Contains producer that is loaded but not started
+   - Live slot: Contains producer that is running and outputting frames
+   - Both slots can contain any `IProducer` implementation (VideoFileProducer, etc.)
+   - Producers are created via factory pattern
+
+5. **IProducer → Plan** (N:1 consumption)
 
    - Producer resolves plan to asset list
    - Multiple producers may use same plan (different channels)
    - Plan is immutable during decode
 
-5. **FrameRingBuffer → Frame** (1:N storage)
+6. **FrameRingBuffer → Frame** (1:N storage)
    - Buffer stores multiple frames simultaneously
-   - Frame ownership transfers: producer → buffer → renderer
+   - Frame ownership transfers: live producer → buffer → renderer
+   - Preview producer does not write to buffer during shadow decode (isolated)
+   - Buffer persists through producer switches (never flushed during switch)
+   - Writer pointer is swapped atomically: `[last_live_frame][first_preview_frame][...]`
    - Frames are freed after renderer consumes
 
 ---
@@ -313,19 +347,22 @@ graph TD
 
 1. Validate channel_id and plan_handle
 2. Allocate FrameRingBuffer (default: 60 frames)
-3. Initialize FrameProducer with plan
-4. Spawn decode thread
-5. Transition to `buffering` state
-6. Once buffer reaches minimum depth (30 frames), transition to `ready`
-7. Emit `retrovue_playout_channel_state{channel="N"} = 2` (ready)
+3. Set producer factory for creating VideoFileProducer instances
+4. Load initial asset into preview slot via `loadPreviewAsset()`
+5. Activate preview as live via `activatePreviewAsLive()` (backward compatibility: first asset goes live immediately)
+6. Start live producer's decode thread
+7. Transition to `buffering` state
+8. Once buffer reaches minimum depth (30 frames), transition to `ready`
+9. Emit `retrovue_playout_channel_state{channel="N"} = 2` (ready)
 
 **Execution** (steady state):
 
-1. Producer continuously decodes and pushes frames
-2. Renderer continuously pulls and renders frames
-3. Buffer maintains depth between 30-60 frames
-4. Metrics updated on every operation
-5. State remains `ready` unless error or underrun
+1. Producer continuously decodes frames (makes available via pull API)
+2. FrameRouter pulls frames from live producer and writes to ring buffer
+3. Renderer continuously pulls and renders frames
+4. Buffer maintains depth between 30-60 frames
+5. Metrics updated on every operation
+6. State remains `ready` unless error or underrun
 
 **Plan Update** (`UpdatePlan`):
 
@@ -336,6 +373,38 @@ graph TD
 5. Rebuild buffer to minimum depth
 6. Transition back to `ready`
 7. Expected downtime: ≤ 500ms
+
+**Preview Load** (`LoadPreview`):
+
+1. Validate channel_id, path, and asset_id
+2. Destroy any existing preview producer
+3. Create new producer via factory with specified path
+4. Start producer in **shadow decode mode** (decodes frames but does not write to buffer)
+5. Producer decodes first frame and caches it
+6. Store producer in preview slot (running in shadow mode)
+7. Preview slot is ready for switching with first frame decoded and ready
+
+**Switch to Live** (`SwitchToLive`) - Seamless Algorithm:
+
+1. Validate channel_id and asset_id matches preview slot
+2. Preview producer must have decoded at least one frame (shadow decode complete)
+3. Get last PTS from live producer: `last_live_pts = live.nextPTS()`
+4. Align preview producer PTS: `preview.alignPTS(last_live_pts + frame_duration)`
+5. FrameRouter pulls last frame from live producer and writes to buffer (if needed)
+6. **FrameRouter switches producer**: `router.active_producer = preview` (atomic)
+7. Preview producer exits shadow mode, begins exposing frames via pull API
+8. Live producer stops decoding gracefully (wind down)
+10. Move preview producer to live slot
+11. Reset preview slot to empty
+12. Expected switch time: ≤ 100ms for seamless playout
+
+**Critical Requirements**:
+- **Slot switching occurs at a frame boundary, and the engine guarantees that the final LIVE frame and first PREVIEW frame are placed consecutively in the output ring buffer with no discontinuity in timing or PTS.**
+- Ring buffer is **NOT flushed** during switch (persists through switch)
+- Renderer pipeline is **NOT reset** (continues reading seamlessly)
+- PTS continuity is **mandatory** (no jumps, no resets to zero)
+- Preview producer's first frame PTS = last_live_pts + frame_duration
+- No visual discontinuity, no black frames, no stutter
 
 **Shutdown** (`StopChannel`):
 
@@ -358,9 +427,14 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 | Thread              | Purpose                           | Count per Channel |
 | ------------------- | --------------------------------- | ----------------- |
 | Main / gRPC         | Handles control plane requests    | 1 (shared)        |
-| Decode Worker       | Decodes frames from media assets  | 1                 |
+| Decode Worker (Live)| Decodes frames from live producer | 1 (only live slot producer runs) |
 | Metrics Exporter    | Serves `/metrics` endpoint        | 1 (shared)        |
 | Renderer (external) | Pulls frames and generates output | 1 (shared)        |
+
+**Note**: 
+- Preview slot producer runs in **shadow decode mode** (decodes frames but FrameRouter does not pull from it)
+- FrameRouter pulls frames from live slot producer and writes to ring buffer
+- Both producers run decode threads and expose pull-based API, but only live producer's frames are routed
 
 **Synchronization**:
 
@@ -371,11 +445,17 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 
 **Thread Safety Guarantees**:
 
-1. **Producer thread** (decode):
+1. **Producer thread** (decode - both slots):
 
-   - Exclusively pushes to FrameRingBuffer
-   - Never blocks on buffer full (drops frame and increments counter)
+   - Live slot producer: Decodes frames and makes them available via pull API (e.g., `nextFrame()`)
+   - Preview slot producer: Decodes frames in **shadow mode** (frames available but not pulled by router)
+   - Both producers run decode threads, but only live producer's frames are pulled by FrameRouter
+   - Producers do NOT write to buffer directly - they expose pull-based API
+   - FrameRouter pulls from active producer and writes to FrameRingBuffer
+   - FrameRouter never blocks on buffer full (drops frame and increments counter)
+   - Preview producer caches first decoded frame and aligns PTS
    - Atomically updates decode metrics
+   - Producer switch is atomic (FrameRouter switches which producer it pulls from)
 
 2. **Consumer thread** (renderer):
 
@@ -429,13 +509,15 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 
 ### BC-003: Idempotent Control Operations
 
-**Rule**: All gRPC control methods (`StartChannel`, `UpdatePlan`, `StopChannel`) must be idempotent.
+**Rule**: All gRPC control methods (`StartChannel`, `UpdatePlan`, `StopChannel`, `LoadPreview`, `SwitchToLive`) must be idempotent.
 
 **Examples**:
 
 - `StartChannel` on already-started channel returns success (no-op)
 - `StopChannel` on already-stopped channel returns success (no-op)
 - `UpdatePlan` with same plan_handle is no-op
+- `LoadPreview` with same asset_id replaces existing preview producer (idempotent in effect)
+- `SwitchToLive` with mismatched asset_id returns error (no state change)
 
 **Rationale**: Allows ChannelManager to retry failed operations without side effects.
 
@@ -482,7 +564,35 @@ The playout engine uses a **multi-threaded, lock-free** architecture:
 - If PTS decreases or duplicates, log error and skip frame
 - Increment `retrovue_playout_decode_failure_count`
 
-**Exception**: PTS may reset when transitioning between assets (plan update).
+**Exception**: PTS may reset when transitioning between assets (plan update or producer switch).
+
+### BC-007: Dual-Producer Switching Seamlessness
+
+**Rule**: Switching from preview to live must occur at ring buffer boundary with perfect PTS continuity and no visual discontinuity.
+
+**Enforcement**:
+
+- **Slot switching occurs at a frame boundary, and the engine guarantees that the final LIVE frame and first PREVIEW frame are placed consecutively in the output ring buffer with no discontinuity in timing or PTS.**
+- Preview producer must decode in **shadow mode** before switch (first frame decoded and cached)
+- Preview producer PTS must align: `preview_first_pts = live_last_pts + frame_duration`
+- Ring buffer is **NOT flushed** during switch (persists through switch)
+- Ring buffer writer pointer is swapped atomically: `ringbuffer.writer = preview`
+- Renderer pipeline is **NOT reset** (continues reading seamlessly)
+- Last live frame and first preview frame appear back-to-back in buffer
+- Switch completes within 100ms for seamless playout
+- No PTS jumps, no resets to zero, no negative deltas
+- No visual pop, no black frame, no stutter
+
+**Seamless Switch Algorithm**:
+1. Preview producer decodes until ready (shadow mode)
+2. Preview producer aligns PTS to continue from live producer
+3. Acquire ring buffer writer lock
+4. Write last frame from live (if needed)
+5. Swap writer pointer atomically
+6. Preview exits shadow mode, begins writing
+7. Live producer stops gracefully
+
+**Exception**: First asset loaded via `StartChannel` goes directly to live (backward compatibility).
 
 ---
 

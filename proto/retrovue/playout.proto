@@ -34,6 +34,14 @@ service PlayoutControl {
 
   // GetVersion returns the API version implemented by the playout engine.
   rpc GetVersion(ApiVersionRequest) returns (ApiVersion);
+
+  // LoadPreview loads a producer into the preview slot.
+  // The producer is prepared but does not output frames to the renderer.
+  rpc LoadPreview(LoadPreviewRequest) returns (LoadPreviewResponse);
+
+  // SwitchToLive switches the preview slot producer to the live slot.
+  // This stops the current live producer, flushes the renderer, and activates preview as live.
+  rpc SwitchToLive(SwitchToLiveRequest) returns (SwitchToLiveResponse);
 }
 
 // StartChannelRequest provides the context required to initialize a playout channel.
@@ -78,5 +86,30 @@ message ApiVersionRequest {}
 // ApiVersion communicates the protocol version supported by the engine.
 message ApiVersion {
   string version = 1;        // Semantic version string of the playout control API.
+}
+
+// LoadPreviewRequest provides the path and asset ID for loading into preview slot.
+message LoadPreviewRequest {
+  int32 channel_id = 1;      // Target channel identifier.
+  string path = 2;          // File path to the asset.
+  string asset_id = 3;       // Unique identifier for the asset.
+}
+
+// LoadPreviewResponse reports success or failure of loading the preview asset.
+message LoadPreviewResponse {
+  bool success = 1;          // Indicates whether the preview asset was loaded successfully.
+  string message = 2;        // Optional diagnostic or error detail.
+}
+
+// SwitchToLiveRequest identifies the channel and asset to switch to live.
+message SwitchToLiveRequest {
+  int32 channel_id = 1;      // Target channel identifier.
+  string asset_id = 2;       // Asset ID that should be switched to live (must match preview slot).
+}
+
+// SwitchToLiveResponse reports the result of the switch operation.
+message SwitchToLiveResponse {
+  bool success = 1;          // True if the switch completed successfully.
+  string message = 2;        // Optional human-readable status message.
 }
 

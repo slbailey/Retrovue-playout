@@ -54,5 +54,14 @@ int64_t PTSController::GetFirstFrameWallclockUs() const {
   return first_frame_wallclock_us_;
 }
 
+void PTSController::resetForNewProducer() {
+  // Reset PTS offset and continuity counter state
+  pts_base_90k_ = 0;
+  last_pts_90k_ = 0;
+  first_frame_wallclock_us_ = 0;
+  initialized_ = false;
+  // Frame timing history is implicitly reset since we're starting fresh
+}
+
 }  // namespace retrovue::playout_sinks::mpegts
 

@@ -40,6 +40,11 @@ class TSMuxer {
   // Returns true on success, false on failure
   virtual bool Flush();
 
+  // Resets the muxer for a new producer.
+  // Called when switching from preview to live to reset continuity counter state
+  // and frame timing history.
+  virtual void resetForNewProducer();
+
   // Check if muxer is initialized
   bool IsInitialized() const { return is_initialized_; }
 

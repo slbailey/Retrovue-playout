@@ -64,7 +64,10 @@ namespace retrovue::producers::video_file
         playback_start_utc_us_(0),
         stub_pts_counter_(0),
         frame_interval_us_(static_cast<int64_t>(std::round(kMicrosecondsPerSecond / config.target_fps))),
-        next_stub_deadline_utc_(0)
+        next_stub_deadline_utc_(0),
+        shadow_decode_mode_(false),
+        shadow_decode_ready_(false),
+        pts_offset_us_(0)
   {
   }
 
@@ -566,8 +569,12 @@ namespace retrovue::producers::video_file
     }
 
     // Extract frame PTS in microseconds for pacing
-    int64_t frame_pts_us = output_frame.metadata.pts;
+    int64_t base_pts_us = output_frame.metadata.pts;
+    // Apply PTS offset for alignment
+    int64_t frame_pts_us = base_pts_us + pts_offset_us_;
+    output_frame.metadata.pts = frame_pts_us;
     last_decoded_frame_pts_us_ = frame_pts_us;
+    last_pts_us_ = frame_pts_us;
 
     // Establish time mapping on first frame
     if (first_frame_pts_us_ == 0)
@@ -579,11 +586,30 @@ namespace retrovue::producers::video_file
       }
     }
 
+    // Check if in shadow decode mode
+    bool shadow_mode = shadow_decode_mode_.load(std::memory_order_acquire);
+    if (shadow_mode)
+    {
+      // Shadow mode: cache first frame, don't push to buffer
+      std::lock_guard<std::mutex> lock(shadow_decode_mutex_);
+      if (!cached_first_frame_)
+      {
+        cached_first_frame_ = std::make_unique<buffer::Frame>(output_frame);
+        shadow_decode_ready_.store(true, std::memory_order_release);
+        std::cout << "[VideoFileProducer] Shadow decode: first frame cached, PTS=" 
+                  << frame_pts_us << std::endl;
+        // Emit ShadowDecodeReady event
+        EmitEvent("ShadowDecodeReady", "");
+      }
+      // Don't push to buffer in shadow mode, but continue decoding
+      return true;
+    }
+
     // Calculate target UTC time for this frame: playback_start + (frame_pts - first_frame_pts)
     int64_t frame_offset_us = frame_pts_us - first_frame_pts_us_;
     int64_t target_utc_us = playback_start_utc_us_ + frame_offset_us;
 
-    // Frame decoded and pushed to buffer
+    // Frame decoded and ready to push
 
     // If using fake clock, wait until fake time reaches target UTC time before pushing
     if (master_clock_ && master_clock_->is_fake())
@@ -786,16 +812,39 @@ namespace retrovue::producers::video_file
     frame.height = config_.target_height;
     
     int64_t pts_counter = stub_pts_counter_.fetch_add(1, std::memory_order_relaxed);
-    frame.metadata.pts = pts_counter * frame_interval_us_;
+    int64_t base_pts = pts_counter * frame_interval_us_;
+    frame.metadata.pts = base_pts + pts_offset_us_;  // Apply PTS offset for alignment
     frame.metadata.dts = frame.metadata.pts;
     frame.metadata.duration = 1.0 / config_.target_fps;
     frame.metadata.asset_uri = config_.asset_uri;
+
+    // Update last_pts_us_ for PTS tracking
+    last_pts_us_ = frame.metadata.pts;
 
     // Generate YUV420 planar data (stub: all zeros for now)
     size_t frame_size = static_cast<size_t>(config_.target_width * config_.target_height * 1.5);
     frame.data.resize(frame_size, 0);
 
-    // Attempt to push decoded frame
+    // Check if in shadow decode mode
+    bool shadow_mode = shadow_decode_mode_.load(std::memory_order_acquire);
+    if (shadow_mode)
+    {
+      // Shadow mode: cache first frame, don't push to buffer
+      std::lock_guard<std::mutex> lock(shadow_decode_mutex_);
+      if (!cached_first_frame_)
+      {
+        cached_first_frame_ = std::make_unique<buffer::Frame>(frame);
+        shadow_decode_ready_.store(true, std::memory_order_release);
+        std::cout << "[VideoFileProducer] Shadow decode: first frame cached, PTS=" 
+                  << frame.metadata.pts << std::endl;
+        // Emit ShadowDecodeReady event
+        EmitEvent("ShadowDecodeReady", "");
+      }
+      // Don't push to buffer in shadow mode
+      return;
+    }
+
+    // Normal mode: attempt to push decoded frame
     if (output_buffer_.Push(frame))
     {
       frames_produced_.fetch_add(1, std::memory_order_relaxed);
@@ -820,6 +869,69 @@ namespace retrovue::producers::video_file
         std::this_thread::sleep_for(std::chrono::microseconds(kProducerBackoffUs));
       }
     }
+  }
+
+  void VideoFileProducer::SetShadowDecodeMode(bool enabled)
+  {
+    shadow_decode_mode_.store(enabled, std::memory_order_release);
+    if (!enabled)
+    {
+      // Exiting shadow mode - clear cached frame
+      std::lock_guard<std::mutex> lock(shadow_decode_mutex_);
+      cached_first_frame_.reset();
+      shadow_decode_ready_.store(false, std::memory_order_release);
+    }
+    else
+    {
+      // Entering shadow mode - reset readiness state
+      std::lock_guard<std::mutex> lock(shadow_decode_mutex_);
+      shadow_decode_ready_.store(false, std::memory_order_release);
+      cached_first_frame_.reset();
+    }
+  }
+
+  bool VideoFileProducer::IsShadowDecodeMode() const
+  {
+    return shadow_decode_mode_.load(std::memory_order_acquire);
+  }
+
+  bool VideoFileProducer::IsShadowDecodeReady() const
+  {
+    return shadow_decode_ready_.load(std::memory_order_acquire);
+  }
+
+  int64_t VideoFileProducer::GetNextPTS() const
+  {
+    // Return the PTS that the next frame will have
+    // This is last_pts_us_ + frame_interval_us_ + pts_offset_us_
+    // Note: last_pts_us_ is not atomic, but we're reading it in a const method
+    // In practice, this is called from the state machine which holds a lock
+    int64_t next_pts = last_pts_us_;
+    if (next_pts == 0)
+    {
+      // First frame - use pts_offset_us_ as base
+      return pts_offset_us_;
+    }
+    return next_pts + frame_interval_us_ + pts_offset_us_;
+  }
+
+  void VideoFileProducer::AlignPTS(int64_t target_pts)
+  {
+    // Calculate offset needed to align next frame to target_pts
+    // Note: last_pts_us_ is not atomic, but this is called from state machine which holds a lock
+    int64_t next_pts_without_offset = last_pts_us_;
+    if (next_pts_without_offset == 0)
+    {
+      // First frame - set offset directly
+      pts_offset_us_ = target_pts;
+    }
+    else
+    {
+      // Calculate offset: target_pts - (next_pts_without_offset + frame_interval_us_)
+      pts_offset_us_ = target_pts - (next_pts_without_offset + frame_interval_us_);
+    }
+    std::cout << "[VideoFileProducer] Aligned PTS: target=" << target_pts 
+              << ", offset=" << pts_offset_us_ << std::endl;
   }
 
 } // namespace retrovue::producers::video_file

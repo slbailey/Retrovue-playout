@@ -11,21 +11,38 @@ The **Renderer** is the final stage in the RetroVue Playout Engine's media pipel
 ### Pipeline Position
 
 ```
-┌──────────────┐     ┌────────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Video      │     │   FFmpeg       │     │    Frame     │     │   Renderer   │
-│   Asset      │────▶│   Decoder      │────▶│  RingBuffer  │────▶│  (Consumer)  │
-│  (MP4/MKV)   │     │ (libavcodec)   │     │  (60 frames) │     │              │
-└──────────────┘     └────────────────┘     └──────────────┘     └──────────────┘
-      Source              Producer              Staging              Consumer
+┌──────────────┐     ┌────────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Video      │     │   Live         │     │   Frame      │     │    Frame     │     │   Renderer   │
+│   Asset      │────▶│   Producer     │────▶│   Router     │────▶│  RingBuffer  │────▶│  (Consumer)  │
+│  (MP4/MKV)   │     │ (Decode only)  │     │ (Pull+Push)  │     │  (60 frames) │     │              │
+└──────────────┘     └────────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+      Source         Exposes Pull API         Writer              Staging              Consumer
+                                                                                        (ONLY reads
+                                                                                         from buffer)
+
+┌──────────────┐     ┌────────────────┐
+│   Preview    │     │   Preview      │
+│   Asset      │────▶│   Producer     │  (Shadow decode: decodes, frames available but not pulled)
+│  (MP4/MKV)   │     │ (Decode only)  │
+└──────────────┘     └────────────────┘
+      Source         (Preview Slot - isolated until switch)
 ```
+
+**Key Points**:
+- **Live Producer**: Decodes frames and exposes them via pull API (e.g., `nextFrame()`)
+- **Preview Producer**: Decodes frames in shadow mode (frames available but not pulled by router)
+- **FrameRouter**: Pulls frames from live producer and writes to ring buffer (single writer)
+- **Renderer**: Consumes frames from ring buffer ONLY (single consumer, never reads from producers)
+- **Seamless Switch**: FrameRouter switches which producer it pulls from; ring buffer contains frames from both producers across switch boundary
 
 ### Core Responsibilities
 
-1. **Frame Consumption**: Pop frames from the `FrameRingBuffer` in real-time
+1. **Frame Consumption**: Pop frames from the `FrameRingBuffer` in real-time (seamlessly across producer switches)
 2. **Output Delivery**: Render frames to the appropriate destination (display, hardware, validation)
-3. **Timing Control**: Maintain frame pacing based on metadata timestamps
+3. **Timing Control**: Maintain frame pacing based on metadata timestamps (continuous across switches)
 4. **Statistics Tracking**: Monitor render performance (FPS, gaps, skips)
 5. **Graceful Degradation**: Handle empty buffers and transient errors without crashing
+6. **Format Change Handling**: Detect resolution/format changes mid-stream and handle as metadata change, NOT pipeline reset
 
 ### Why Separate Renderer?
 
@@ -259,21 +276,38 @@ The renderer is intentionally **non-critical**: decode and buffering continue ev
 
 **Relationship**: Consumer
 
-The renderer is the **sole consumer** of frames from the `FrameRingBuffer`.
+The renderer is the **sole consumer** of frames from the `FrameRingBuffer`. The ring buffer has a **single writer**: **FrameRouter** writes frames to the buffer. FrameRouter pulls frames from the live slot producer (preview slot producer runs in shadow decode mode and is not pulled by router until switched to live).
 
 ```
-FrameRingBuffer                    FrameRenderer
-┌─────────────────┐               ┌──────────────────┐
-│ write_index (W) │               │  RenderLoop()    │
-│                 │               │                  │
-│  [Frame][Frame] │               │  while running:  │
-│  [Frame][Frame] │  ──Pop()────▶ │    frame = Pop() │
-│  [Frame][Frame] │               │    RenderFrame() │
-│                 │               │    UpdateStats() │
-│ read_index (R)  │               │                  │
-└─────────────────┘               └──────────────────┘
-   Producer: Decode                 Consumer: Render
+FrameRouter                        FrameRingBuffer                    FrameRenderer
+┌─────────────────┐               ┌─────────────────┐               ┌──────────────────┐
+│ Pull from Live  │               │ write_index (W) │               │  RenderLoop()    │
+│ Producer        │───Write()────▶│                 │               │                  │
+│ (nextFrame())   │               │  [Frame][Frame] │               │  while running:  │
+│                 │               │  [Frame][Frame] │  ──Pop()────▶ │    frame = Pop() │
+│ (Preview in     │               │  [Frame][Frame] │               │    RenderFrame() │
+│  shadow mode)   │               │                 │               │    UpdateStats() │
+└─────────────────┘               │ read_index (R)  │               │                  │
+   Writer                          └─────────────────┘               └──────────────────┘
+   (Pulls, then writes)                                              Consumer: Render
+                                                                      (Read-only, never
+                                                                       interacts with producers)
 ```
+
+**Frame Flow Model (Pull-Based Architecture)**:
+
+- **Live Producer**: **Only decodes when `nextFrame()` is called** - exposes pull-based API, does NOT push frames
+- **Preview Producer**: Decodes frames in shadow mode (frames available but not pulled by router until switch)
+- **FrameRouter**: **Owns the clock** - calls `producer->nextFrame()` and writes result to ring buffer
+- **Renderer**: Consumes frames from ring buffer via `buffer.Pop(frame)` - **ONLY reads from buffer, never from producers**
+- **Seamless Switch**: FrameRouter switches which producer it calls `nextFrame()` on; ring buffer persists
+- **Ring Buffer Contains Frames from Both Producers**: During a switch, FrameRouter writes the final frame of the LIVE producer followed immediately by the first frame of the PREVIEW producer into the FrameRingBuffer, ensuring the sink receives an uninterrupted sequence with no glitch, no discontinuity, and no timestamp reset. This is the heart of the switching system.
+
+**Why Pull Model?**
+- **Engine owns the clock**: FrameRouter controls timing, ensuring deterministic frame delivery
+- **No race conditions**: Producers decode only when requested, eliminating overlap/collision
+- **Perfect for FFmpeg → MPEG-TS**: Stable, deterministic timing required for broadcast output
+- **Seamless switching**: FrameRouter can atomically switch which producer it pulls from
 
 **Contract**:
 
@@ -281,6 +315,146 @@ FrameRingBuffer                    FrameRenderer
 - Returns false when buffer empty (non-blocking)
 - Never modifies buffer state except read index
 - Single consumer guarantee (one render thread per buffer)
+- **Single writer guarantee**: Only FrameRouter writes to buffer; FrameRouter pulls from live producer via `nextFrame()`; preview is isolated until switch
+- **Renderer isolation**: Renderer ONLY reads from FrameRingBuffer; never interacts with producers or FrameRouter directly
+- **Pull-based decoding**: Producers decode frames only when `nextFrame()` is called by FrameRouter; no autonomous pushing
+
+---
+
+## 🔄 Switch Boundary Behavior
+
+This section documents the exact mechanics of seamless producer switching, which is the core of Phase 9's dual-producer architecture.
+
+### Architecture: Pull-Based Model
+
+The switching system uses a **pull-based model** where:
+
+1. **Producers decode frames only** - they do NOT write to buffers
+2. **FrameRouter pulls frames** from the active producer via `nextFrame()` API
+3. **FrameRouter writes frames** into FrameRingBuffer at its own controlled pace
+4. **Renderer reads from FrameRingBuffer only** - never interacts with producers
+
+This model ensures:
+- **Engine owns the clock**: FrameRouter controls timing deterministically
+- **No race conditions**: Producers decode only when requested
+- **Perfect synchronization**: FrameRouter can atomically switch which producer it pulls from
+- **Stable for broadcast**: Deterministic timing required for FFmpeg → MPEG-TS output
+
+### Switch Sequence
+
+When `SwitchToLive(asset_id)` is called, the following sequence occurs:
+
+```
+Time    FrameRouter              Live Producer          Preview Producer         FrameRingBuffer
+─────────────────────────────────────────────────────────────────────────────────────────────────
+T0      Pull frame N             Decode frame N        (shadow decode)          [Frame N-1][Frame N]
+        from live                (on nextFrame call)    (ready, aligned)         [Frame N+1]...
+        
+T1      Pull last frame          Decode frame N+1      (shadow decode)          [Frame N][Frame N+1]
+        from live                (on nextFrame call)    (first frame cached)     [Frame N+2]...
+        
+T2      Switch producer          (stops)               (exits shadow mode)      [Frame N+1][Frame N+2]
+        router.active_producer                         (ready for pull)         [Preview Frame 0]...
+        = preview
+        
+T3      Pull first frame         (stopped)             Decode Preview Frame 0   [Frame N+2][Preview 0]
+        from preview                                    (on nextFrame call)      [Preview Frame 1]...
+        
+T4      Continue pulling         (stopped)             Decode Preview Frame 1   [Preview 0][Preview 1]
+        from preview                                    (on nextFrame call)      [Preview Frame 2]...
+```
+
+### Critical Requirements
+
+1. **PTS Continuity**: 
+   - Preview producer's first frame PTS = Live producer's last frame PTS + frame_duration
+   - No PTS jumps, no resets to zero, no negative deltas
+   - Achieved via `preview.alignPTS(live_last_pts + frame_duration)` before switch
+
+2. **Frame Sequence in Buffer**:
+   - FrameRingBuffer contains: `[last_live_frame][first_preview_frame][...]`
+   - Both frames appear back-to-back with no gap
+   - Renderer sees uninterrupted sequence: final frame from live producer immediately followed by first frame from preview producer
+
+3. **No Visual Discontinuity**:
+   - No glitch, no black frame, no stutter
+   - No timestamp reset
+   - No pipeline restart
+   - Renderer continues reading seamlessly
+
+4. **Atomic Switch**:
+   - FrameRouter switches which producer it calls `nextFrame()` on atomically
+   - Ring buffer is never flushed during switch
+   - Switch completes within 100ms for seamless playout
+
+### Implementation Details
+
+**Producer API (Pull-Based)**:
+```cpp
+class IProducer {
+    // Producer decodes frame ONLY when this is called
+    // Returns frame with aligned PTS
+    virtual Frame* nextFrame() = 0;
+    
+    // Shadow decode support
+    virtual bool isShadowDecodeReady() const = 0;
+    virtual void alignPTS(int64_t target_pts) = 0;
+    virtual int64_t getNextPTS() const = 0;
+};
+```
+
+**FrameRouter Logic**:
+```cpp
+void FrameRouter::RouteLoop() {
+    while (running_) {
+        // Pull frame from active producer (only decodes when called)
+        Frame* frame = active_producer_->nextFrame();
+        
+        // Write to ring buffer at controlled pace
+        if (ring_buffer_.Push(*frame)) {
+            // Success - continue
+        } else {
+            // Buffer full - drop frame, increment counter
+        }
+        
+        // Sleep until next frame tick (engine owns clock)
+        WaitForFrameInterval();
+    }
+}
+```
+
+**Switch Logic**:
+```cpp
+void FrameRouter::SwitchToPreview(Producer* preview) {
+    // 1. Pull last frame from live producer
+    Frame* last_live = live_producer_->nextFrame();
+    ring_buffer_.Push(*last_live);
+    
+    // 2. Align preview PTS
+    int64_t target_pts = live_producer_->getNextPTS() + frame_duration;
+    preview->alignPTS(target_pts);
+    
+    // 3. Atomic switch
+    active_producer_ = preview;  // Now pulls from preview
+    
+    // 4. Pull first frame from preview (already aligned)
+    Frame* first_preview = preview->nextFrame();
+    ring_buffer_.Push(*first_preview);
+    
+    // 5. Stop live producer gracefully
+    live_producer_->stop();
+}
+```
+
+### Benefits of Pull Model
+
+1. **Deterministic Timing**: Engine controls when frames are decoded and written
+2. **No Race Conditions**: Producers cannot overlap or collide
+3. **Perfect Synchronization**: FrameRouter can switch producers atomically
+4. **Broadcast Quality**: Stable timing required for MPEG-TS output
+5. **Seamless Switching**: Last live frame and first preview frame appear back-to-back in buffer
+
+---
 
 ### MetricsExporter
 
@@ -323,9 +497,27 @@ The `PlayoutService` creates, starts, updates, and stops renderers as part of ch
 // Channel Lifecycle with Renderer
 StartChannel(plan_handle):
     1. Create FrameRingBuffer
-    2. Create & start FrameProducer (decode thread)
-    3. Create & start FrameRenderer (render thread)  ← Renderer enters here
-    4. Update metrics
+    2. Load initial asset into preview slot
+    3. Activate preview as live (backward compatibility)
+    4. Start live producer (decode thread)
+    5. Create & start FrameRenderer (render thread)  ← Renderer enters here
+    6. Update metrics
+
+LoadPreview(path, asset_id):
+    1. Load producer into preview slot (not started)
+    2. Preview slot ready for switching
+
+SwitchToLive(asset_id):
+    1. Preview producer decodes until ready (shadow mode)
+    2. Align preview PTS to continue from live: `preview_pts = live_last_pts + frame_duration`
+    3. FrameRouter calls `live_producer->nextFrame()` to get last frame and writes to buffer (if needed)
+    4. **FrameRouter switches producer**: `router.active_producer = preview` (atomic)
+    5. Preview exits shadow mode, begins exposing frames via pull API
+    6. Live producer stops decoding gracefully
+    7. Move preview producer to live slot
+    8. **Renderer continues seamlessly** - no reset, no flush, no timing change
+    9. **FrameRingBuffer contains**: `[last_live_frame][first_preview_frame][...]` with continuous PTS
+    10. Renderer sees uninterrupted sequence: final frame from live producer immediately followed by first frame from preview producer, with no glitch, no discontinuity, no timestamp reset
 
 UpdatePlan(new_plan_handle):
     1. Stop FrameRenderer                           ← Stop consumer first
@@ -342,10 +534,17 @@ StopChannel():
 
 **Integration Contract**:
 
-- Renderer created AFTER buffer and producer
-- Renderer stopped BEFORE producer (consumer before producer)
-- Renderer failure non-fatal (warning logged, producer continues)
+- Renderer created AFTER buffer and FrameRouter
+- Renderer stopped BEFORE FrameRouter (consumer before writer)
+- Renderer failure non-fatal (warning logged, FrameRouter continues)
 - Renderer lifecycle independent of decode errors
+- **Renderer does NOT reset pipeline on producer switch** (continues reading seamlessly)
+- Renderer must handle format/resolution changes mid-stream as metadata changes, not pipeline resets
+- **Renderer ONLY reads from FrameRingBuffer** - never interacts with producers or FrameRouter directly
+- **FrameRingBuffer contains frames from both producers across switch boundary**: During a switch, FrameRouter writes the final frame of the LIVE producer followed immediately by the first frame of the PREVIEW producer into the FrameRingBuffer, ensuring the renderer receives an uninterrupted sequence
+- Renderer sees continuous frame stream: `[last_live_frame][first_preview_frame][...]` with no gap, no glitch, no discontinuity, no timestamp reset
+- PTS continuity is maintained across switches (renderer sees continuous PTS sequence)
+- No timing renegotiation, no pipeline restart, no discontinuity flags
 
 ---
 
@@ -363,8 +562,8 @@ Each channel's renderer runs in its own dedicated thread, independent of the dec
 │  │ gRPC Thread  │  │ Decode Thread│  │ Render Thread│       │
 │  │              │  │              │  │              │       │
 │  │ StartChannel │  │ while (1) {  │  │ while (1) {  │       │
-│  │ UpdatePlan   │  │   Decode()   │  │   Pop()      │       │
-│  │ StopChannel  │  │   Push()     │  │   Render()   │       │
+│  │ UpdatePlan   │  │   nextFrame()│  │   Pop()      │       │
+│  │ StopChannel  │  │   Write()    │  │   Render()   │       │
 │  │ GetVersion   │  │ }            │  │   Stats()    │       │
 │  │              │  │              │  │ }            │       │
 │  └──────────────┘  └──────────────┘  └──────────────┘       │
